@@ -204,25 +204,23 @@ created
 awaiting_client_data
   ↓
 data_received
-  ↓
-validation_failed ─────► awaiting_client_data
-  ↓
-awaiting_approval
-  ├────────► rejected
-  ↓
-approved
-  ↓
-provisioning
-  ↓
-provisioning_failed ───► provisioning
-  ↓
-provisioned
-  ↓
-finalizing
-  ↓
-finalization_failed ───► finalizing
-  ↓
-completed
+  ├────────► validation_failed ─────► awaiting_client_data
+  └────────► awaiting_approval
+                ├────────► rejected
+                ↓
+              approved
+                ↓
+           provisioning
+                ↓
+provisioning_failed ───────────────► provisioning
+                ↓
+            provisioned
+                ↓
+             finalizing
+                ↓
+finalization_failed ───────────────► finalizing
+                ↓
+             completed
 ```
 
 ### State meanings
@@ -230,7 +228,7 @@ completed
 - `created`: the case exists but the data collection request has not been completed;
 - `awaiting_client_data`: the client must provide required information;
 - `data_received`: submitted data has been stored;
-- `validation_failed`: one or more validation rules failed;
+- `validation_failed`: one or more validation rules failed and the case must return to `awaiting_client_data` for corrected data;
 - `awaiting_approval`: data is valid and awaits human review;
 - `rejected`: the operator rejected the onboarding case;
 - `approved`: the operator approved provisioning;
