@@ -16,7 +16,7 @@ A successful onboarding case must produce the following business outcome:
 
 - the client record exists in the platform;
 - required client data has been collected and validated;
-- a responsible employee has approved the onboarding;
+- an approval response has been recorded through the configured approval process;
 - the client has been provisioned in the target service;
 - a Google Drive folder has been created;
 - a kickoff meeting has been created;
@@ -30,13 +30,13 @@ The first implementation includes:
 
 - receiving a `Deal Won` webhook from a CRM or controlled mock CRM;
 - creating exactly one onboarding case for a source deal;
-- collecting client data through an n8n Form Trigger workflow;
+- sending the client data request through Gmail and collecting the response through an n8n Form Trigger workflow;
 - validating required fields and business rules;
 - requesting manual approval through Gmail using an n8n wait-for-response approval step;
 - provisioning a client account through a mock REST API;
 - creating a Google Drive folder;
 - creating a Google Calendar kickoff event;
-- notifying the internal team;
+- notifying the internal team through Gmail;
 - recording workflow state, operations, events, and errors in PostgreSQL;
 - retrying recoverable failures without repeating successful operations;
 - exposing enough data for operational monitoring and testing.
@@ -111,11 +111,11 @@ Receives a Gmail approval request, reviews validated data, and approves or rejec
 
 ### n8n Form Trigger
 
-Provides the client-facing data collection form and starts processing when the client submits it. Access is protected by a cryptographically random, single-use token with a limited lifetime.
+Provides the client-facing data collection form and starts processing when the client submits it. The form is generic; a submission is accepted only when it contains a cryptographically random, single-use token with a limited lifetime.
 
 ### Gmail
 
-Delivers the approval request to the configured recipient and returns the approve or reject response to n8n.
+Sends client data requests, approval requests, and internal team notifications. For approval requests, Gmail returns the approve or reject response to n8n.
 
 ### n8n
 
@@ -141,9 +141,9 @@ Stores the client onboarding folder.
 
 Stores the kickoff meeting.
 
-### Team notification channel
+### Internal team email
 
-Receives internal status notifications. The concrete channel will be selected during integration design.
+Receives completion and intervention notifications through Gmail at a configured internal distribution address.
 
 ## 7. High-level process
 
@@ -195,7 +195,7 @@ Client ── protected n8n Form submission
       ├──────────────► Mock Provisioning API
       ├──────────────► Google Drive
       ├──────────────► Google Calendar
-      └──────────────► Team Notification Channel
+      └──────────────► Internal Team Email
 
 Redis supports n8n queue mode and worker execution.
 ```
@@ -282,7 +282,7 @@ Responsibilities:
 
 - generate a cryptographically random client form token;
 - store only the token hash together with its onboarding case, expiry, and lifecycle timestamps;
-- send the client data request with the protected n8n form link;
+- send the client data request through Gmail with the token-bearing n8n form link;
 - receive the n8n Form Trigger submission;
 - reject a missing, invalid, expired, revoked, or already-used token;
 - atomically consume a valid token so concurrent submissions cannot reuse it;
@@ -333,7 +333,7 @@ Responsibilities:
 - atomically create or reuse each required external operation;
 - create or reuse the Google Drive folder;
 - create or reuse the kickoff calendar event;
-- send or reuse the internal notification;
+- send or reuse the internal Gmail notification to the configured team address;
 - reconcile uncertain external results before retrying;
 - verify that all required operations succeeded;
 - move the case to `completed` or `finalization_failed`.
@@ -542,7 +542,8 @@ Existing events are not edited to hide earlier decisions or failures.
 - client form access uses high-entropy, single-use tokens with a limited lifetime;
 - only form token hashes are stored in PostgreSQL;
 - form token validation and consumption are atomic;
-- logs must not contain credentials, raw form tokens, approval links, or complete sensitive documents;
+- application logs must not contain credentials, raw form tokens, approval links, or complete sensitive documents;
+- WF02 execution-data retention must be configured so the raw form token is not retained after processing;
 - Gmail approval requests are sent only to the configured approval recipient;
 - the configured recipient, response, request reference, and decision time are recorded;
 - Gmail approval links identify the request but do not independently authenticate the person opening the link;
@@ -616,9 +617,9 @@ The following decisions are fixed for the initial implementation:
 9. Completed operations are not repeated during retry.
 10. Business events are stored separately from technical errors.
 11. The first external account integration is a controlled Mock Provisioning API.
-12. Client data collection uses an n8n Form Trigger protected by an expiring, single-use token whose hash is stored in PostgreSQL.
-13. Manual approval uses Gmail and an n8n wait-for-response approval step addressed to a configured recipient.
-14. Gmail approval records the intended recipient and response but is not treated as independent identity verification.
+12. Client data collection uses a generic n8n Form Trigger; submissions are authorized by an expiring, single-use token whose hash is stored in PostgreSQL.
+13. Gmail sends the client form link, the approval request, and the internal team notification.
+14. Manual approval uses an n8n Gmail wait-for-response step addressed to a configured recipient; it records the intended recipient and response but is not treated as independent identity verification.
 15. Architecture and database schema are completed before building n8n workflows.
 
 ## 21. Known risks
@@ -651,7 +652,7 @@ Mitigation: persist each operation result, use expiring leases, and resume from 
 
 A form link may be forwarded, logged, reused, or opened after its intended lifetime.
 
-Mitigation: high-entropy single-use tokens, hash-only storage, short expiry, atomic consumption, and log redaction.
+Mitigation: high-entropy single-use tokens, hash-only PostgreSQL storage, short expiry, atomic consumption, log redaction, and restricted WF02 execution-data retention.
 
 ### Approval link forwarding
 
@@ -680,7 +681,7 @@ The architecture stage is complete when:
 - terminal states are explicit;
 - workflow responsibilities are approved;
 - source-deal uniqueness is approved;
-- form-token lifecycle and approval-request behavior are approved;
+- form-token lifecycle, approval-request behavior, and Gmail notification recipients are approved;
 - idempotency, concurrency, lease, reconciliation, and retry rules are approved;
 - failure and partial-recovery behavior are approved;
 - core tables and their responsibilities are approved;
