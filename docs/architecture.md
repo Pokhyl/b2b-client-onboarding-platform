@@ -6,7 +6,7 @@ The platform automates the operational onboarding of a new B2B client after a de
 
 The system coordinates data collection, validation, human approval, external account provisioning, document creation, kickoff scheduling, team notification, and final completion tracking.
 
-The project is designed as a production-style automation portfolio project. Its purpose is to demonstrate reliable workflow orchestration, persistent state management, external API integration, idempotency, retry handling, auditability, and safe recovery from partial failures. It applies production-oriented engineering practices but does not claim to be a production deployment for real customers.
+The project is designed as a production-oriented reference implementation. Its purpose is to demonstrate reliable workflow orchestration, persistent state management, external API integration, idempotency, retry handling, auditability, and safe recovery from partial failures. It applies production-oriented engineering practices but does not claim to be a production deployment for real customers.
 
 ## 2. Business objective
 
@@ -26,7 +26,7 @@ A successful onboarding case must produce the following business outcome:
 
 ## 3. Scope
 
-The first portfolio implementation includes:
+The first implementation includes:
 
 - receiving a `Deal Won` webhook from a CRM or controlled mock CRM;
 - creating exactly one onboarding case for a source deal;
@@ -502,7 +502,7 @@ The initial source for these metrics is PostgreSQL. A dedicated visualization la
 
 ## 18. Deployment model
 
-The planned local and portfolio deployment uses Docker Compose.
+The planned local deployment uses Docker Compose.
 
 Initial services:
 
