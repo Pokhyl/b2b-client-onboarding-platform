@@ -6,7 +6,7 @@ The platform automates the operational onboarding of a new B2B client after a de
 
 The system coordinates data collection, validation, human approval, external account provisioning, document creation, kickoff scheduling, team notification, and final completion tracking.
 
-The project is designed as a production-grade automation portfolio project. Its purpose is to demonstrate reliable workflow orchestration, persistent state management, external API integration, idempotency, retry handling, auditability, and safe recovery from partial failures.
+The project is designed as a production-style automation portfolio project. Its purpose is to demonstrate reliable workflow orchestration, persistent state management, external API integration, idempotency, retry handling, auditability, and safe recovery from partial failures. It applies production-oriented engineering practices but does not claim to be a production deployment for real customers.
 
 ## 2. Business objective
 
@@ -26,13 +26,13 @@ A successful onboarding case must produce the following business outcome:
 
 ## 3. Scope
 
-The first production-ready version includes:
+The first portfolio implementation includes:
 
 - receiving a `Deal Won` webhook from a CRM or controlled mock CRM;
 - creating exactly one onboarding case for a source deal;
-- collecting client data through a form or API endpoint;
+- collecting client data through an n8n Form Trigger workflow;
 - validating required fields and business rules;
-- requesting manual approval;
+- requesting manual approval through Gmail using an n8n wait-for-response approval step;
 - provisioning a client account through a mock REST API;
 - creating a Google Drive folder;
 - creating a Google Calendar kickoff event;
@@ -83,7 +83,7 @@ If the operation was completed, the workflow reuses the stored external identifi
 
 ### 5.4 Human approval is mandatory before provisioning
 
-Validation may be automatic, but account provisioning starts only after an authorized employee approves the onboarding case.
+Validation may be automatic, but account provisioning starts only after an authorized employee approves the onboarding case through the Gmail approval step. The approval or rejection response, approver identity, and decision timestamp must be stored in PostgreSQL.
 
 ### 5.5 Failures are explicit business states
 
@@ -93,7 +93,7 @@ A failed API request is not only an n8n execution error. The failure must be sto
 
 The project is divided into several workflows. One very large workflow is avoided because it is harder to test, retry, document, and maintain.
 
-## 6. Main actors
+## 6. Main actors and systems
 
 ### CRM
 
@@ -101,11 +101,19 @@ Produces the initial `Deal Won` event.
 
 ### Client
 
-Provides the required company and contact data.
+Provides the required company and contact data through the n8n form.
 
 ### Onboarding operator
 
-Reviews validated data and approves or rejects the case.
+Receives a Gmail approval request, reviews validated data, and approves or rejects the case.
+
+### n8n Form Trigger
+
+Provides the client-facing data collection form and starts processing when the client submits it.
+
+### Gmail
+
+Delivers the approval request and returns the operator's approve or reject response to n8n.
 
 ### n8n
 
@@ -142,13 +150,15 @@ CRM Deal Won
     ↓
 Create Onboarding Case
     ↓
-Request Client Data
+Request Client Data through n8n Form
     ↓
-Receive Client Data
+Receive n8n Form Submission
     ↓
 Validate Data
     ↓
-Manual Approval
+Request Gmail Approval
+    ↓
+Receive Approve or Reject Response
     ↓
 Provision Client Account
     ↓
@@ -169,10 +179,13 @@ CRM / Mock CRM
       │ Deal Won webhook
       ▼
      n8n ───────────────► PostgreSQL
-      │                      ▲
+      ▲                      ▲
       │                      │ state, events,
       │                      │ operations, errors
       │
+Client ── n8n Form submission
+      │
+      ├──────────────► Gmail approval request ──► Onboarding operator
       ├──────────────► Mock Provisioning API
       ├──────────────► Google Drive
       ├──────────────► Google Calendar
@@ -250,8 +263,9 @@ Responsibilities:
 
 Responsibilities:
 
-- send the client data request;
-- receive the submitted form or API payload;
+- generate or reuse the client-specific n8n form access data;
+- send the client data request with the n8n form link;
+- receive the n8n Form Trigger submission;
 - normalize submitted values;
 - store the submitted data;
 - move the case to `data_received`;
@@ -271,8 +285,9 @@ Responsibilities:
 
 Responsibilities:
 
-- present the case to the onboarding operator;
-- receive the approval or rejection decision;
+- send the validated case to the onboarding operator through Gmail;
+- wait for an approve or reject response;
+- validate that the response belongs to the expected onboarding case;
 - record who made the decision and when;
 - move the case to `approved` or `rejected`;
 - invoke provisioning after approval.
@@ -469,6 +484,7 @@ Existing events are not edited to hide earlier decisions or failures.
 - webhook endpoints must validate a shared secret or signature where supported;
 - logs must not contain credentials, tokens, or complete sensitive documents;
 - manual approval actions must identify the approving user;
+- Gmail approval responses must be linked to the expected onboarding case;
 - external API permissions should follow the least-privilege principle.
 
 ## 17. Observability
@@ -535,7 +551,9 @@ The following decisions are fixed for the initial implementation:
 7. Completed operations are not repeated during retry.
 8. Business events are stored separately from technical errors.
 9. The first external account integration is a controlled Mock Provisioning API.
-10. Architecture and database schema are completed before building n8n workflows.
+10. Client data collection uses an n8n Form Trigger workflow.
+11. Manual approval uses Gmail and an n8n wait-for-response approval step.
+12. Architecture and database schema are completed before building n8n workflows.
 
 ## 21. Known risks
 
