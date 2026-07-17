@@ -4,15 +4,16 @@
 
 The platform automates B2B client onboarding after a CRM deal reaches `Won`.
 
-The architecture is designed to preserve authoritative business state in PostgreSQL, prevent duplicate external side effects, support multiple n8n workers safely, recover from partial failures, and provide a complete audit trail.
+The architecture preserves authoritative business state in PostgreSQL, prevents duplicate external side effects, supports multiple n8n workers safely, recovers from partial failures, and provides a complete audit trail.
 
 ## 2. Business outcome
 
 A completed onboarding case means that:
 
 - exactly one onboarding case exists for the source CRM deal;
-- the B2B client identity and submitted data are stored;
-- submitted data passed validation;
+- at least one versioned client-data submission exists;
+- the accepted submission passed validation;
+- the canonical B2B client record was created or reused from validated data;
 - an onboarding operator approved the case;
 - the external client account exists;
 - the Google Drive folder exists;
@@ -21,24 +22,27 @@ A completed onboarding case means that:
 - all business transitions and external operations are recorded;
 - the case reached terminal state `completed`.
 
-A rejected onboarding case reaches terminal state `rejected` and does not provision or finalize any external resources.
+A rejected onboarding case reaches terminal state `rejected` and does not provision or finalize external resources.
 
 ## 3. Initial scope
 
 The initial implementation includes:
 
 - an authenticated `Deal Won` webhook from a controlled mock CRM;
-- deterministic source-event and source-deal idempotency;
-- B2B client creation or reuse by normalized company identifier;
+- source-event and source-deal idempotency;
 - secure client data collection through an n8n Form Trigger;
+- versioned storage of every accepted form submission;
 - expiring, single-use form access tokens;
+- temporary encrypted token material for safe delivery retries;
 - deterministic data normalization and validation;
+- canonical B2B client creation or reuse only after validation;
 - manual approval through Gmail using an n8n wait-for-response operation;
 - client provisioning through a controlled Mock Provisioning API;
 - Google Drive folder creation;
 - Google Calendar kickoff event creation;
 - internal team notification through Gmail to a configured distribution address;
-- PostgreSQL persistence of states, steps, tokens, events, operations, and errors;
+- idempotent operator intervention notifications;
+- PostgreSQL persistence of cases, steps, submissions, tokens, events, operations, and errors;
 - bounded retries with exponential backoff;
 - recovery from interrupted n8n executions and stale operation leases;
 - Docker Compose deployment with PostgreSQL, Redis, n8n main, multiple workers, and the Mock Provisioning API.
@@ -62,23 +66,29 @@ The initial implementation does not include:
 
 ### 5.1 PostgreSQL owns business state
 
-PostgreSQL stores the authoritative case state, step status, form-token lifecycle, audit events, external-operation status, and error records.
+PostgreSQL stores the authoritative case state, step status, submission history, form-token lifecycle, audit events, external-operation status, and error records.
 
 n8n coordinates work but must always read and conditionally update PostgreSQL before performing state-sensitive actions.
 
-### 5.2 External side effects are idempotent
+### 5.2 Unvalidated data is not canonical client data
 
-Every external create operation has a deterministic unique `idempotency_key`.
+CRM intake metadata and form submissions are not authoritative client records.
 
-A retry or duplicate workflow execution must reuse a successful operation result instead of creating another resource.
+Every valid token submission is stored in `onboarding_submissions`. Only a submission that passes validation may create or update a row in `clients` and link that client to the onboarding case.
 
-### 5.3 Operation claims are concurrency-safe
+### 5.3 External side effects are idempotent
 
-Multiple workers may process jobs concurrently. An external operation must be claimed atomically before the API call.
+Every outbound message and external create operation has a deterministic unique `idempotency_key`.
+
+A retry or duplicate workflow execution must reuse a successful operation result instead of repeating the side effect.
+
+### 5.4 Operation claims are concurrency-safe
+
+Multiple workers may process jobs concurrently. An external operation must be claimed atomically before the external call.
 
 The operation record includes a lease owner and lease expiry. A second worker cannot perform the same operation while a valid lease exists.
 
-### 5.4 State transitions use compare-and-set updates
+### 5.5 State transitions use compare-and-set updates
 
 A workflow changes state only when the current state matches the expected previous state.
 
@@ -93,24 +103,25 @@ WHERE id = :case_id
 
 The workflow must verify that exactly one row was updated. Zero updated rows means the transition is stale, duplicated, or invalid.
 
-### 5.5 Business failures and technical errors are different
+### 5.6 Business failures and technical errors are different
 
-Examples of business outcomes:
+Business outcomes include:
 
 - validation failed;
 - approval rejected;
-- retry limit reached.
+- external operation reached a permanent failure;
+- retry limit was exhausted.
 
-Examples of technical errors:
+Technical errors include:
 
 - database connection failed;
 - unexpected workflow exception;
 - credential configuration is invalid;
 - response payload cannot be parsed.
 
-Business outcomes are represented by case, step, event, and operation records. Unexpected technical failures are additionally stored in `error_log`.
+Business outcomes are represented by case, step, submission, event, and operation records. Unexpected technical failures are additionally stored in `error_log`.
 
-### 5.6 Successful operations are not compensated automatically
+### 5.7 Successful operations are not compensated automatically
 
 When a later operation fails, previously successful external resources are preserved and reused.
 
@@ -128,13 +139,13 @@ The webhook uses a configured shared secret or signature. Unauthenticated reques
 
 Receives a Gmail message containing a client-specific n8n form link and submits required company and contact data.
 
-Possession of a valid, unexpired form token authorizes one form submission for the corresponding onboarding case.
+Possession of a valid, unexpired form token authorizes one submission for the corresponding onboarding case and request cycle.
 
 ### Onboarding operator
 
 Receives the approval request in a configured Gmail mailbox and selects approve or reject.
 
-The initial trust boundary is access to that mailbox. The system records the configured recipient, response, timestamp, and workflow metadata, but does not claim cryptographic proof of the physical person who clicked the link.
+The initial trust boundary is access to that mailbox. The system records the configured recipient, waiting execution reference, response, timestamp, and workflow metadata, but does not claim cryptographic proof of the physical person who clicked the link.
 
 ### n8n
 
@@ -154,11 +165,11 @@ Creates the external client account. It accepts an idempotency key and returns t
 
 ### Google Drive
 
-Stores one onboarding folder per successful case.
+Stores one onboarding folder per successfully provisioned case.
 
 ### Google Calendar
 
-Stores one kickoff event per successful case.
+Stores one kickoff event per successfully provisioned case.
 
 ### Gmail
 
@@ -166,7 +177,8 @@ Is used for:
 
 - client data requests and correction requests;
 - operator approval requests;
-- internal team completion or intervention notifications.
+- internal team completion notifications;
+- operator intervention notifications.
 
 ## 7. High-level flow
 
@@ -178,7 +190,7 @@ Controlled Mock CRM
       WF01
         │
         ▼
-PostgreSQL: create or reuse client and onboarding case
+PostgreSQL: create or reuse onboarding case
         │
         ▼
       WF02 ── Gmail client form link
@@ -187,9 +199,12 @@ PostgreSQL: create or reuse client and onboarding case
 Client submits n8n Form Trigger
         │
         ▼
-      WF03
-        ├── invalid data ──→ validation_failed ──→ WF02 with new token
-        └── valid data ────→ awaiting_approval ─→ WF04
+      WF03 ── store versioned submission
+        ├── invalid data ──→ validation_failed ──→ WF02 with new request cycle
+        └── valid data ────→ create or reuse canonical client
+                                  │
+                                  ▼
+                           awaiting_approval ─→ WF04
                                                    ├── reject ─→ rejected
                                                    └── approve
                                                         │
@@ -214,10 +229,10 @@ Client submits n8n Form Trigger
 ### 8.1 States
 
 - `created` — the case was created from the source deal;
-- `awaiting_client_data` — a valid form request is available and client data is expected;
-- `data_received` — a valid token was consumed and submitted data was stored;
-- `validation_failed` — stored data failed one or more business validation rules;
-- `awaiting_approval` — stored data is valid and awaits operator decision;
+- `awaiting_client_data` — a client-data request was delivered successfully and a valid token is active;
+- `data_received` — a valid token was consumed and a versioned submission was stored;
+- `validation_failed` — the stored submission failed one or more business validation rules;
+- `awaiting_approval` — the accepted submission is valid, the canonical client is linked, and operator decision is required;
 - `rejected` — terminal state; the operator rejected the case;
 - `approved` — the operator approved external provisioning;
 - `provisioning` — the client-account operation is active;
@@ -261,15 +276,21 @@ UNIQUE (source_system, source_deal_id)
 
 This rule applies regardless of case state.
 
-### 9.2 Source event idempotency
+### 9.2 Source event uniqueness
 
-Each CRM event identifier is processed once. Duplicate delivery of the same event returns the already-associated onboarding case.
+Each source event is processed once:
+
+```text
+UNIQUE (source_system, source_event_id)
+```
+
+Duplicate delivery of the same event returns the already-associated onboarding case. A different event for the same deal also resolves to the existing case through source-deal uniqueness.
 
 ### 9.3 Client identity
 
-The initial implementation requires a company identifier and its country and type.
+The accepted submission must include a company identifier and its country and type.
 
-A client is created or reused by the normalized identity tuple:
+A canonical client is created or reused by the normalized identity tuple:
 
 ```text
 (company_identifier_country,
@@ -279,32 +300,82 @@ A client is created or reused by the normalized identity tuple:
 
 Email address alone is not used as the B2B client deduplication key.
 
-### 9.4 Approval prerequisite
+### 9.4 Submission ownership
 
-Provisioning is allowed only when the case state is `approved`.
+Every successfully authorized form submission creates a new immutable submission version for one onboarding case.
 
-### 9.5 Completion prerequisite
+A failed submission remains stored with validation errors but cannot update canonical client data.
 
-The case may enter `completed` only when all mandatory external operations have status `succeeded`:
+Only the accepted valid submission identifier is referenced from the onboarding case.
+
+### 9.5 Approval prerequisite
+
+Provisioning is allowed only when:
+
+- case state is `approved`;
+- a valid accepted submission is linked;
+- a canonical client is linked;
+- the approval step is completed with decision `approved`.
+
+### 9.6 Completion prerequisite
+
+The case may enter `completed` only when these mandatory external operations have status `succeeded`:
 
 - provision client account;
 - create Drive folder;
 - create kickoff event;
 - send team notification.
 
-### 9.6 Form token lifecycle
+### 9.7 Form token lifecycle
 
-A form token belongs to exactly one case and has these properties:
+A form token belongs to exactly one case and request cycle.
+
+It has these properties:
 
 - random plain value generated with a cryptographically secure generator;
-- only a SHA-256 hash stored in PostgreSQL;
+- SHA-256 hash stored for validation;
 - configurable expiry, initially 72 hours;
 - one successful atomic consumption;
-- invalid after expiry, revocation, or consumption.
+- invalid after expiry, revocation, or consumption;
+- temporary AES-GCM-encrypted token material may exist while delivery is pending;
+- the encryption key is stored outside PostgreSQL;
+- encrypted token material is cleared after confirmed Gmail delivery.
 
-The submission process must claim and consume the token atomically before accepting its data.
+The submission process must claim and consume the token atomically before storing the submission.
 
-## 10. Workflow boundaries
+### 9.8 One active approval request
+
+Only one manual-approval step may be active for a case.
+
+The active step stores the n8n waiting execution reference. Duplicate WF04 invocations return the existing active request instead of sending another approval email.
+
+## 10. External operation types
+
+The initial `external_operations` types are:
+
+- `send_client_data_request`;
+- `send_approval_request`;
+- `provision_client`;
+- `create_drive_folder`;
+- `create_kickoff_event`;
+- `notify_team`;
+- `notify_operator_intervention`.
+
+Operations that may legitimately occur multiple times use a key containing their request-cycle entity:
+
+```text
+onboarding:<case_id>:form-token:<token_id>:send-client-data-request
+onboarding:<case_id>:send-approval-request
+onboarding:<case_id>:provision-client
+onboarding:<case_id>:create-drive-folder
+onboarding:<case_id>:create-kickoff-event
+onboarding:<case_id>:notify-team
+error:<error_id>:notify-operator-intervention
+```
+
+A new correction token produces a new client-request operation. A retry of the same token reuses the same operation key.
+
+## 11. Workflow boundaries
 
 ### WF01 — Intake Deal Won
 
@@ -315,29 +386,34 @@ Responsibilities:
 - authenticate the webhook;
 - validate required source fields;
 - normalize the source system, event, deal, company, and contact values;
-- insert or reuse the client by normalized company identity;
-- insert or reuse the onboarding case by source-deal uniqueness;
+- insert or reuse the onboarding case by source-deal and source-event uniqueness;
+- store CRM company and contact values as non-authoritative intake metadata;
 - record the source event and case-created business event once;
-- invoke WF02 only when the case requires a data request.
+- invoke WF02 only when the case is `created` and has no successfully delivered data request.
 
-WF01 does not send the form itself and does not provision external resources.
+WF01 does not create a canonical client, send the form directly, or provision external resources.
 
 ### WF02 — Request Client Data
 
-Trigger: WF01 or validation-correction path from WF03.
+Trigger: WF01 or the validation-correction path from WF03.
 
 Responsibilities:
 
-- verify the case may enter or remain in `awaiting_client_data`;
-- revoke any older unused form token for the case;
-- generate a new random token;
-- store its hash, expiry, and lifecycle metadata;
-- build the n8n Form Trigger URL containing the plain token;
+- verify the case is `created` or `validation_failed`;
+- create a new request cycle when invoked for initial collection or a new failed submission;
+- create or reuse the token row for that request cycle;
+- generate random token material when the cycle is first created;
+- store the token hash and temporary encrypted delivery material;
+- create or atomically claim the `send_client_data_request` external operation;
+- decrypt the token only in memory to build the n8n Form Trigger URL;
 - send the Gmail request to the client;
-- record the request event;
-- conditionally move the case to `awaiting_client_data`.
+- store the Gmail message identifier and response summary;
+- mark the operation `succeeded` only after confirmed delivery;
+- clear encrypted token material after confirmed delivery;
+- conditionally move the case to `awaiting_client_data`;
+- record the request event.
 
-WF02 never stores the plain token.
+When Gmail delivery fails before confirmation, WF98 retries the same operation and reuses the encrypted token. WF02 does not create a different token for the same request cycle.
 
 ### WF03 — Receive and Validate Client Data
 
@@ -346,16 +422,21 @@ Trigger: n8n Form Trigger.
 Responsibilities:
 
 - hash the submitted plain token;
-- atomically validate and consume the matching unexpired token;
-- reject submissions with an invalid, expired, revoked, or consumed token;
+- atomically validate and consume the matching active, unexpired token;
+- reject invalid, expired, revoked, or consumed tokens without changing case state;
+- record an appropriate sanitized security event for unauthorized submissions;
 - normalize submitted values;
-- store the current client data;
+- insert a new immutable `onboarding_submissions` version;
 - move the case from `awaiting_client_data` to `data_received`;
 - execute deterministic validation rules;
-- store validation details in the step and event records;
-- move the case to `validation_failed` or `awaiting_approval`;
-- invoke WF02 after validation failure;
-- invoke WF04 after successful validation.
+- store validation status and detailed errors with the submission;
+- update the validation step and append business events;
+- on validation failure, move the case to `validation_failed` and invoke WF02 with the failed submission identifier as the new request-cycle key;
+- on validation success, atomically create or reuse the canonical client by normalized company identity;
+- update canonical client fields from the accepted submission;
+- link the accepted submission and canonical client to the case;
+- move the case to `awaiting_approval`;
+- invoke WF04.
 
 Validation failure is a business outcome, not an unexpected technical error.
 
@@ -365,14 +446,20 @@ Trigger: WF03 after successful validation.
 
 Responsibilities:
 
-- verify the case is `awaiting_approval`;
-- send a Gmail approval request to the configured operator mailbox;
+- verify the case is `awaiting_approval` and has an accepted submission and canonical client;
+- atomically claim the `manual_approval` step;
+- return the existing active wait when the step already contains an active n8n waiting execution;
+- create or claim the `send_approval_request` external operation;
+- send a Gmail approval request to the configured operator mailbox using the n8n wait-for-response operation;
+- store expected recipient, Gmail message identifier, waiting execution reference, and sanitized request metadata;
 - wait for approve or reject;
-- store expected recipient, decision, decision time, and response metadata;
+- store the decision, decision time, and response metadata;
 - conditionally move the case to terminal `rejected` or to `approved`;
 - invoke WF05 only after a successful transition to `approved`.
 
 A duplicate or late response must not change a terminal or already-advanced case.
+
+An approval delivery or waiting-execution failure that cannot be reconciled requires operator intervention rather than automatically sending an uncontrolled duplicate approval request.
 
 ### WF05 — Provision Client
 
@@ -381,7 +468,8 @@ Trigger: WF04 after approval or WF98 for a due retry.
 Responsibilities:
 
 - verify the case is `approved` or `provisioning_failed`;
-- move the case conditionally to `provisioning`;
+- verify the canonical client and accepted submission are linked;
+- conditionally move the case to `provisioning`;
 - create or atomically claim the `provision_client` external operation;
 - call the Mock Provisioning API with the deterministic idempotency key;
 - store the external client identifier and response summary;
@@ -437,32 +525,34 @@ Trigger: n8n error workflow mechanism and explicit calls for unexpected technica
 Responsibilities:
 
 - normalize workflow and integration errors;
-- store workflow identifier, execution identifier, case, step, operation, error class, message, and sanitized details;
+- store workflow identifier, execution identifier, case, step, submission, operation, error class, message, and sanitized details;
 - classify retryability when possible;
-- avoid storing credentials, tokens, or full sensitive payloads;
-- notify the configured operator mailbox when manual intervention is required.
+- avoid storing credentials, plain tokens, encryption material, or full sensitive payloads;
+- create or claim `notify_operator_intervention` using an error-specific idempotency key when manual intervention is required.
 
 WF99 does not independently advance business state without a validated state-specific recovery rule.
 
-## 11. Data model responsibilities
+## 12. Data model responsibilities
 
 ### `clients`
 
-Stores normalized B2B company identity, company data, and primary contact data.
+Stores validated canonical B2B company identity, company data, and primary contact data.
 
 Important rules:
 
 - normalized company identifier tuple is unique;
-- updates preserve audit events;
-- the current record contains the latest accepted client data.
+- only validated submissions may create or update canonical fields;
+- updates preserve submission and event audit history.
 
 ### `onboarding_cases`
 
 Stores:
 
 - source system, source event, and source deal identity;
+- non-authoritative intake metadata;
 - current authoritative state;
-- linked client;
+- linked canonical client when validation succeeded;
+- accepted submission identifier when validation succeeded;
 - correlation identifier;
 - approval summary;
 - external client identifier;
@@ -482,11 +572,34 @@ Initial step types:
 - `create_kickoff_event`;
 - `notify_team`.
 
-The table supports operational visibility for steps that are not external side effects as well as steps backed by `external_operations`.
+Required properties include status, attempt count, started time, completed time, last error summary, and optional active n8n execution reference.
+
+### `onboarding_submissions`
+
+Stores one immutable version for every authorized form submission.
+
+Required properties include:
+
+- case identifier;
+- submission sequence;
+- submitted values;
+- normalized values;
+- validation status;
+- validation error details;
+- submitted and validated timestamps.
+
+Sensitive values must be minimized and stored only where required by the business process.
 
 ### `onboarding_form_tokens`
 
-Stores token hash, case, expiry, status, issued time, consumed time, revoked time, and request metadata.
+Stores:
+
+- case and request-cycle identity;
+- token hash;
+- temporary encrypted token material while delivery is pending;
+- token status;
+- expiry;
+- issued, delivered, consumed, revoked, and updated timestamps.
 
 The plain token is never persisted.
 
@@ -508,66 +621,61 @@ Each event stores:
 
 ### `external_operations`
 
-Stores every external side effect.
+Stores every recorded external side effect.
 
-Initial operation types:
-
-- `provision_client`;
-- `create_drive_folder`;
-- `create_kickoff_event`;
-- `notify_team`.
-
-Required operational fields include:
+Required fields include:
 
 - deterministic unique idempotency key;
 - operation type;
 - status;
+- related case, token, submission, step, or error identifier when applicable;
 - attempt count and maximum attempts;
 - next retry time;
 - lease owner and lease expiry;
 - request and response summaries;
-- external resource identifier;
+- external message or resource identifier;
 - last error classification;
 - created, started, completed, and updated timestamps.
 
 ### `error_log`
 
-Stores normalized unexpected technical and integration errors. It may reference a case, step, and external operation when known.
+Stores normalized unexpected technical and integration errors. It may reference a case, step, submission, and external operation when known.
 
-## 12. External-operation protocol
+## 13. External-operation protocol
 
-### 12.1 Deterministic keys
+### 13.1 Statuses
 
-```text
-onboarding:<case_id>:provision-client
-onboarding:<case_id>:create-drive-folder
-onboarding:<case_id>:create-kickoff-event
-onboarding:<case_id>:notify-team
-```
+Initial operation statuses:
 
-### 12.2 Atomic claim
+- `pending`;
+- `in_progress`;
+- `succeeded`;
+- `failed_retryable`;
+- `failed_terminal`.
+
+### 13.2 Atomic claim
 
 The database claim operation must perform one of these outcomes atomically:
 
 - insert a new `in_progress` operation with a lease;
-- claim a due retryable operation whose lease is absent or expired;
+- claim a due `pending` or `failed_retryable` operation whose lease is absent or expired;
 - return the existing `succeeded` result;
 - refuse the claim when another valid lease exists;
-- refuse the claim for a terminal failure or exhausted retry limit.
+- refuse the claim for `failed_terminal` or exhausted retry limit.
 
-### 12.3 External call
+### 13.3 External call
 
 The workflow sends the same deterministic idempotency key to integrations that support it.
 
-For Google APIs, the stored operation and external identifiers provide application-level idempotency. The workflow must search or reconcile by the deterministic case reference when an API response may have been lost after resource creation.
+For Gmail and Google APIs, the stored operation, deterministic case reference, message marker, and external identifiers provide application-level idempotency and reconciliation.
 
-### 12.4 Completion
+### 13.4 Completion
 
 Only the worker that owns the current lease may mark the operation result.
 
-If the process stops after the external system created the resource but before PostgreSQL was updated, the retry path must reconcile before creating anything again.
+If the process stops after the external system performed the side effect but before PostgreSQL was updated, the retry path must reconcile by deterministic marker or external identifier before repeating the action.
 
-## 13. Retry and failure handling
+## 14. Retry and failure handling
 
 ### Retryable examples
 
@@ -575,14 +683,16 @@ If the process stops after the external system created the resource but before P
 - HTTP 502, 503, or 504;
 - network timeout;
 - temporary DNS or connection failure;
-- expired worker lease after interruption.
+- expired worker lease after interruption;
+- transient Gmail, Drive, or Calendar API failure.
 
 ### Terminal examples
 
 - invalid request payload confirmed by validation;
 - invalid permissions requiring configuration change;
 - resource creation rejected by a permanent business rule;
-- maximum retry attempts exhausted.
+- maximum retry attempts exhausted;
+- approval waiting execution cannot be reconciled safely.
 
 HTTP 401 or 403 is not retried automatically until credentials or permissions are corrected.
 
@@ -592,39 +702,43 @@ HTTP 401 or 403 is not retried automatically until credentials or permissions ar
 provision_client: succeeded
 create_drive_folder: succeeded
 create_kickoff_event: failed_retryable
-notify_team: not_started
+notify_team: pending
 ```
 
 The retry path reuses the client and Drive folder, retries only the Calendar operation, and sends the notification only after Calendar succeeds.
 
-## 14. Security
+## 15. Security
 
 - secrets are stored in n8n credentials or environment variables;
 - `.env` is excluded from Git;
 - `.env.example` contains names and safe placeholders only;
 - CRM webhook authentication is mandatory;
-- form tokens are random, expiring, single-use, and stored only as hashes;
-- sensitive request and response data is minimized in events and logs;
-- credentials, plain tokens, and complete sensitive documents are never logged;
+- form tokens are random, expiring, and single-use;
+- token hashes and temporary AES-GCM ciphertext are stored separately from the encryption key;
+- encrypted token material is deleted after successful delivery;
+- sensitive request and response data is minimized in submissions, events, and logs;
+- credentials, plain tokens, encryption keys, and complete sensitive documents are never logged;
 - PostgreSQL and Redis are not exposed publicly in the default deployment;
 - the Mock Provisioning API is available only on the internal Docker network unless explicitly required for testing;
 - Google credentials use the minimum permissions required for Gmail, Drive, and Calendar operations.
 
-## 15. Observability
+## 16. Observability
 
 PostgreSQL queries must make it possible to determine:
 
 - case count by state;
 - cases waiting for client data or approval;
 - terminal rejected and completed cases;
+- submission count and latest validation result per case;
 - failed and exhausted operations;
 - retry attempts and next retry times;
 - stale operation leases;
+- active approval waiting executions;
 - average and maximum onboarding duration;
 - current status of every required step;
 - the business and technical history of one case by correlation identifier.
 
-## 16. Deployment model
+## 17. Deployment model
 
 Docker Compose will provide:
 
@@ -640,7 +754,7 @@ Persistent volumes are required for PostgreSQL and any n8n data that must surviv
 
 Exact Docker files are created only after the PostgreSQL schema and tests pass the Stage 2 gate.
 
-## 17. Repository structure
+## 18. Repository structure
 
 ```text
 b2b-client-onboarding-platform/
@@ -668,18 +782,23 @@ b2b-client-onboarding-platform/
 
 Files and directories are added only when their implementation stage starts.
 
-## 18. Architecture acceptance criteria
+## 19. Architecture acceptance criteria
 
 The architecture stage passes only when all of these statements are true:
 
 - PostgreSQL ownership of business state is unambiguous;
+- unvalidated data cannot modify canonical client data;
+- every authorized form submission is versioned;
 - exactly one onboarding case is enforced per source deal;
+- source event delivery is idempotent;
 - terminal states and all allowed transitions are explicit;
 - validation failure cannot reach approval without corrected data;
 - rejection cannot reach provisioning;
 - form access has an expiring single-use token design;
+- token delivery can be retried without storing a plain token;
+- only one approval wait may be active per case;
 - approval trust boundary is documented accurately;
-- all external side effects use `external_operations`;
+- all outbound messages and external resources use `external_operations`;
 - operation claiming is safe with multiple workers;
 - stale `in_progress` operations have a recovery rule;
 - retryable and terminal failures are distinguished;
