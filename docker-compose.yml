@@ -1,0 +1,71 @@
+name: b2b-client-onboarding-platform
+
+services:
+  postgres:
+    image: postgres:18.4-alpine3.23
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: "${POSTGRES_ADMIN_USER:?POSTGRES_ADMIN_USER is required}"
+      POSTGRES_PASSWORD: "${POSTGRES_ADMIN_PASSWORD:?POSTGRES_ADMIN_PASSWORD is required}"
+      POSTGRES_DB: postgres
+
+      APP_DB_NAME: "${APP_DB_NAME:?APP_DB_NAME is required}"
+      APP_DB_USER: "${APP_DB_USER:?APP_DB_USER is required}"
+      APP_DB_PASSWORD: "${APP_DB_PASSWORD:?APP_DB_PASSWORD is required}"
+
+      N8N_DB_NAME: "${N8N_DB_NAME:?N8N_DB_NAME is required}"
+      N8N_DB_USER: "${N8N_DB_USER:?N8N_DB_USER is required}"
+      N8N_DB_PASSWORD: "${N8N_DB_PASSWORD:?N8N_DB_PASSWORD is required}"
+
+    ports:
+      - "127.0.0.1:${POSTGRES_HOST_PORT:?POSTGRES_HOST_PORT is required}:5432"
+
+    volumes:
+      - postgres_data:/var/lib/postgresql
+      - ./db/init/001_create_databases.sh:/docker-entrypoint-initdb.d/001_create_databases.sh:ro
+
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - pg_isready -U "$${POSTGRES_USER}" -d "$${POSTGRES_DB}"
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 10s
+
+    networks:
+      - backend
+
+  redis:
+    image: redis:8.8.0-alpine
+    restart: unless-stopped
+    environment:
+      REDIS_PASSWORD: "${REDIS_PASSWORD:?REDIS_PASSWORD is required}"
+
+    command:
+      - sh
+      - -ec
+      - exec redis-server --appendonly yes --appendfsync everysec --requirepass "$$REDIS_PASSWORD"
+
+    volumes:
+      - redis_data:/data
+
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - REDISCLI_AUTH="$$REDIS_PASSWORD" redis-cli ping | grep -q PONG
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 5s
+
+    networks:
+      - backend
+
+volumes:
+  postgres_data:
+  redis_data:
+
+networks:
+  backend:
+    driver: bridge
