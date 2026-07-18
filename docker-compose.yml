@@ -191,6 +191,34 @@ services:
     networks:
       - backend
 
+
+  mock-provisioning-api:
+    build:
+      context: ./services/mock-provisioning-api
+
+    image: b2b-onboarding/mock-provisioning-api:local
+    restart: unless-stopped
+
+    environment:
+      MOCK_PROVISIONING_API_PORT: "3001"
+
+    ports:
+      - "127.0.0.1:${MOCK_PROVISIONING_API_PORT:?MOCK_PROVISIONING_API_PORT is required}:3001"
+
+    healthcheck:
+      test:
+        - CMD
+        - node
+        - -e
+        - "fetch('http://127.0.0.1:3001/healthz').then(response => process.exit(response.ok ? 0 : 1)).catch(() => process.exit(1))"
+      interval: 10s
+      timeout: 5s
+      retries: 20
+      start_period: 5s
+
+    networks:
+      - backend
+
 volumes:
   postgres_data:
   redis_data:
