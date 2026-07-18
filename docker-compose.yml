@@ -1,0 +1,229 @@
+name: b2b-client-onboarding-platform
+
+x-n8n-environment: &n8n-environment
+  DB_TYPE: postgresdb
+  DB_POSTGRESDB_HOST: postgres
+  DB_POSTGRESDB_PORT: "5432"
+  DB_POSTGRESDB_DATABASE: "${N8N_DB_NAME:?N8N_DB_NAME is required}"
+  DB_POSTGRESDB_USER: "${N8N_DB_USER:?N8N_DB_USER is required}"
+  DB_POSTGRESDB_PASSWORD: "${N8N_DB_PASSWORD:?N8N_DB_PASSWORD is required}"
+
+  EXECUTIONS_MODE: queue
+  OFFLOAD_MANUAL_EXECUTIONS_TO_WORKERS: "true"
+
+  QUEUE_BULL_REDIS_HOST: redis
+  QUEUE_BULL_REDIS_PORT: "6379"
+  QUEUE_BULL_REDIS_PASSWORD: "${REDIS_PASSWORD:?REDIS_PASSWORD is required}"
+
+  N8N_ENCRYPTION_KEY: "${N8N_ENCRYPTION_KEY:?N8N_ENCRYPTION_KEY is required}"
+
+  N8N_HOST: "${N8N_HOST:?N8N_HOST is required}"
+  N8N_PORT: "${N8N_PORT:?N8N_PORT is required}"
+  N8N_PROTOCOL: "${N8N_PROTOCOL:?N8N_PROTOCOL is required}"
+  N8N_EDITOR_BASE_URL: "${N8N_EDITOR_BASE_URL:?N8N_EDITOR_BASE_URL is required}"
+  WEBHOOK_URL: "${WEBHOOK_URL:?WEBHOOK_URL is required}"
+
+  GENERIC_TIMEZONE: "${GENERIC_TIMEZONE:?GENERIC_TIMEZONE is required}"
+  TZ: "${TZ:?TZ is required}"
+
+services:
+  postgres:
+    image: postgres:18.4-alpine3.23
+    restart: unless-stopped
+
+    environment:
+      POSTGRES_USER: "${POSTGRES_ADMIN_USER:?POSTGRES_ADMIN_USER is required}"
+      POSTGRES_PASSWORD: "${POSTGRES_ADMIN_PASSWORD:?POSTGRES_ADMIN_PASSWORD is required}"
+      POSTGRES_DB: postgres
+
+      APP_DB_NAME: "${APP_DB_NAME:?APP_DB_NAME is required}"
+      APP_DB_USER: "${APP_DB_USER:?APP_DB_USER is required}"
+      APP_DB_PASSWORD: "${APP_DB_PASSWORD:?APP_DB_PASSWORD is required}"
+
+      N8N_DB_NAME: "${N8N_DB_NAME:?N8N_DB_NAME is required}"
+      N8N_DB_USER: "${N8N_DB_USER:?N8N_DB_USER is required}"
+      N8N_DB_PASSWORD: "${N8N_DB_PASSWORD:?N8N_DB_PASSWORD is required}"
+
+    ports:
+      - "127.0.0.1:${POSTGRES_HOST_PORT:?POSTGRES_HOST_PORT is required}:5432"
+
+    volumes:
+      - postgres_data:/var/lib/postgresql
+      - ./db/init/001_create_databases.sh:/docker-entrypoint-initdb.d/001_create_databases.sh:ro
+
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - pg_isready -U "$${POSTGRES_USER}" -d "$${POSTGRES_DB}"
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 10s
+
+    networks:
+      - backend
+
+  redis:
+    image: redis:8.8.0-alpine
+    restart: unless-stopped
+
+    environment:
+      REDIS_PASSWORD: "${REDIS_PASSWORD:?REDIS_PASSWORD is required}"
+
+    command:
+      - sh
+      - -ec
+      - exec redis-server --appendonly yes --appendfsync everysec --requirepass "$$REDIS_PASSWORD"
+
+    volumes:
+      - redis_data:/data
+
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - REDISCLI_AUTH="$$REDIS_PASSWORD" redis-cli ping | grep -q PONG
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 5s
+
+    networks:
+      - backend
+
+  n8n-main:
+    image: "docker.n8n.io/n8nio/n8n:${N8N_VERSION:?N8N_VERSION is required}"
+    restart: unless-stopped
+
+    environment:
+      <<: *n8n-environment
+
+    ports:
+      - "127.0.0.1:${N8N_PORT:?N8N_PORT is required}:5678"
+
+    volumes:
+      - n8n_data:/home/node/.n8n
+
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+    healthcheck:
+      test:
+        - CMD
+        - node
+        - -e
+        - "fetch('http://127.0.0.1:5678/healthz').then(response => process.exit(response.ok ? 0 : 1)).catch(() => process.exit(1))"
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 30s
+
+    networks:
+      - backend
+
+  n8n-worker-1:
+    image: "docker.n8n.io/n8nio/n8n:${N8N_VERSION:?N8N_VERSION is required}"
+    restart: unless-stopped
+
+    command:
+      - worker
+      - "--concurrency=${N8N_WORKER_CONCURRENCY:?N8N_WORKER_CONCURRENCY is required}"
+
+    environment:
+      <<: *n8n-environment
+      QUEUE_HEALTH_CHECK_ACTIVE: "true"
+
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      n8n-main:
+        condition: service_healthy
+
+    healthcheck:
+      test:
+        - CMD
+        - node
+        - -e
+        - "fetch('http://127.0.0.1:5678/healthz/readiness').then(response => process.exit(response.ok ? 0 : 1)).catch(() => process.exit(1))"
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 20s
+
+    networks:
+      - backend
+
+  n8n-worker-2:
+    image: "docker.n8n.io/n8nio/n8n:${N8N_VERSION:?N8N_VERSION is required}"
+    restart: unless-stopped
+
+    command:
+      - worker
+      - "--concurrency=${N8N_WORKER_CONCURRENCY:?N8N_WORKER_CONCURRENCY is required}"
+
+    environment:
+      <<: *n8n-environment
+      QUEUE_HEALTH_CHECK_ACTIVE: "true"
+
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      n8n-main:
+        condition: service_healthy
+
+    healthcheck:
+      test:
+        - CMD
+        - node
+        - -e
+        - "fetch('http://127.0.0.1:5678/healthz/readiness').then(response => process.exit(response.ok ? 0 : 1)).catch(() => process.exit(1))"
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 20s
+
+    networks:
+      - backend
+
+
+  mock-provisioning-api:
+    build:
+      context: ./services/mock-provisioning-api
+
+    image: b2b-onboarding/mock-provisioning-api:local
+    restart: unless-stopped
+
+    environment:
+      MOCK_PROVISIONING_API_PORT: "3001"
+
+    ports:
+      - "127.0.0.1:${MOCK_PROVISIONING_API_PORT:?MOCK_PROVISIONING_API_PORT is required}:3001"
+
+    healthcheck:
+      test:
+        - CMD
+        - node
+        - -e
+        - "fetch('http://127.0.0.1:3001/healthz').then(response => process.exit(response.ok ? 0 : 1)).catch(() => process.exit(1))"
+      interval: 10s
+      timeout: 5s
+      retries: 20
+      start_period: 5s
+
+    networks:
+      - backend
+
+volumes:
+  postgres_data:
+  redis_data:
+  n8n_data:
+
+networks:
+  backend:
+    driver: bridge

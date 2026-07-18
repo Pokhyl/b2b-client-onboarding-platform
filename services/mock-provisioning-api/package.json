@@ -1,0 +1,11 @@
+{
+  "name": "@b2b-onboarding/mock-provisioning-api",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Deterministic mock service for external B2B client provisioning",
+  "type": "module",
+  "scripts": {
+    "start": "node src/server.js",
+    "test": "node --test"
+  }
+}
