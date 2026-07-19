@@ -1,0 +1,1032 @@
+{
+  "name": "WF99 - Central Error Handler",
+  "nodes": [
+    {
+      "parameters": {},
+      "type": "n8n-nodes-base.errorTrigger",
+      "typeVersion": 1,
+      "position": [
+        -592,
+        -16
+      ],
+      "id": "b9d21768-b5ce-40a8-a734-4478efff1f0b",
+      "name": "Error Trigger"
+    },
+    {
+      "parameters": {
+        "jsCode": "// WF99 converts one n8n Error Trigger event into a minimal,\n// sanitized canonical structure.\n//\n// Raw workflow input, stack traces, headers, credentials,\n// request bodies, provider responses, and execution URLs\n// must not leave this node.\n\nconst inputItems = $input.all();\n\nif (inputItems.length !== 1) {\n  throw new Error(\n    `WF99 Error Trigger expected exactly one item, received ${inputItems.length}`,\n  );\n}\n\nconst source = inputItems[0].json ?? {};\n\nconst execution =\n  source.execution && typeof source.execution === 'object'\n    ? source.execution\n    : {};\n\nconst workflow =\n  source.workflow && typeof source.workflow === 'object'\n    ? source.workflow\n    : {};\n\nconst receivedError = execution.error ?? source.error ?? {};\n\nconst rawError =\n  receivedError && typeof receivedError === 'object'\n    ? receivedError\n    : {\n        message: receivedError,\n      };\n\n/**\n * Remove common credential and bearer-token patterns.\n */\nfunction redactSecrets(value) {\n  return value\n    .replace(\n      /\\bBearer\\s+[A-Za-z0-9\\-._~+/]+=*/gi,\n      'Bearer [REDACTED]',\n    )\n    .replace(\n      /((?:authorization|cookie|set-cookie|password|passwd|secret|api[-_ ]?key|access[-_ ]?token|refresh[-_ ]?token)\\s*[:=]\\s*)(\"[^\"]*\"|'[^']*'|[^\\s,;]+)/gi,\n      '$1[REDACTED]',\n    )\n    .replace(\n      /([?&](?:token|access_token|refresh_token|api_key|key)=)[^&\\s]+/gi,\n      '$1[REDACTED]',\n    );\n}\n\n/**\n * Convert an optional value into bounded, sanitized,\n * single-line text.\n */\nfunction safeText(value, maxLength) {\n  if (value === null || value === undefined) {\n    return null;\n  }\n\n  const normalized = redactSecrets(String(value))\n    .replace(\n      /[\\u0000-\\u0008\\u000B\\u000C\\u000E-\\u001F\\u007F]/g,\n      ' ',\n    )\n    .replace(/\\s+/g, ' ')\n    .trim();\n\n  if (!normalized) {\n    return null;\n  }\n\n  return normalized.slice(0, maxLength);\n}\n\nconst sourceWorkflowName =\n  safeText(workflow.name, 200) ?? 'unknown_workflow';\n\nconst errorMessage =\n  safeText(\n    rawError.message ??\n      rawError.description ??\n      rawError.reason ??\n      receivedError,\n    1000,\n  ) ?? 'Unknown workflow failure';\n\nreturn [\n  {\n    json: {\n      source_variant: 'n8n_error_trigger',\n\n      source_workflow_name: sourceWorkflowName,\n      source_workflow_id: safeText(workflow.id, 120),\n      source_execution_id: safeText(execution.id, 120),\n\n      execution_url_present:\n        typeof execution.url === 'string' &&\n        execution.url.trim().length > 0,\n\n      error_name: safeText(rawError.name, 120),\n      error_code: safeText(\n        rawError.code ??\n          rawError.errorCode ??\n          rawError.httpCode ??\n          rawError.statusCode,\n        120,\n      ),\n      error_message: errorMessage,\n\n      node_name: safeText(\n        execution.lastNodeExecuted,\n        200,\n      ),\n\n      case_id: null,\n      step_id: null,\n      submission_id: null,\n      external_operation_id: null,\n      correlation_id: null,\n\n      occurred_at: new Date().toISOString(),\n    },\n  },\n];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -384,
+        -16
+      ],
+      "id": "3f94239f-a351-4259-b0e7-ef0cf526c25f",
+      "name": "Normalize Error Trigger Event"
+    },
+    {
+      "parameters": {
+        "inputSource": "passthrough"
+      },
+      "type": "n8n-nodes-base.executeWorkflowTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        -592,
+        -208
+      ],
+      "id": "2fcd5106-283f-4314-b6e7-3b5229a36204",
+      "name": "Internal Invocation Trigger"
+    },
+    {
+      "parameters": {
+        "jsCode": "// WF99 validates and sanitizes trusted internal workflow calls.\n// Only two variants are accepted:\n// - explicit_internal\n// - notification_retry\n\nconst items = $input.all();\n\nif (items.length !== 1) {\n  throw new Error(\n    `WF99 internal invocation expected exactly one item, received ${items.length}`,\n  );\n}\n\nconst input = items[0].json ?? {};\n\nfunction assertPlainObject(value, fieldName) {\n  if (\n    value === null ||\n    typeof value !== 'object' ||\n    Array.isArray(value)\n  ) {\n    throw new Error(`${fieldName} must be a JSON object`);\n  }\n}\n\nassertPlainObject(input, 'input');\n\nfunction rejectUnknownFields(object, allowedFields) {\n  const unknownFields = Object.keys(object).filter(\n    (key) => !allowedFields.has(key),\n  );\n\n  if (unknownFields.length > 0) {\n    throw new Error(\n      `Unknown top-level fields: ${unknownFields.join(', ')}`,\n    );\n  }\n}\n\nfunction redactSecrets(value) {\n  return value\n    .replace(\n      /\\bBearer\\s+[A-Za-z0-9\\-._~+/]+=*/gi,\n      'Bearer [REDACTED]',\n    )\n    .replace(\n      /((?:authorization|cookie|set-cookie|password|passwd|secret|api[-_ ]?key|access[-_ ]?token|refresh[-_ ]?token)\\s*[:=]\\s*)(\"[^\"]*\"|'[^']*'|[^\\s,;]+)/gi,\n      '$1[REDACTED]',\n    )\n    .replace(\n      /([?&](?:token|access_token|refresh_token|api_key|key)=)[^&\\s]+/gi,\n      '$1[REDACTED]',\n    );\n}\n\nfunction safeText(value, maxLength, required = false) {\n  if (value === null || value === undefined) {\n    if (required) {\n      throw new Error('Required text value is missing');\n    }\n\n    return null;\n  }\n\n  const normalized = redactSecrets(String(value))\n    .replace(\n      /[\\u0000-\\u0008\\u000B\\u000C\\u000E-\\u001F\\u007F]/g,\n      ' ',\n    )\n    .replace(/\\s+/g, ' ')\n    .trim();\n\n  if (!normalized) {\n    if (required) {\n      throw new Error('Required text value is blank');\n    }\n\n    return null;\n  }\n\n  return normalized.slice(0, maxLength);\n}\n\nfunction optionalUuid(value, fieldName) {\n  if (value === null || value === undefined) {\n    return null;\n  }\n\n  if (typeof value !== 'string') {\n    throw new Error(`${fieldName} must be a UUID string or null`);\n  }\n\n  const normalized = value.trim().toLowerCase();\n\n  const uuidPattern =\n    /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;\n\n  if (!uuidPattern.test(normalized)) {\n    throw new Error(`${fieldName} must contain a valid UUID`);\n  }\n\n  return normalized;\n}\n\nconst blockedDetailKeyPattern =\n  /authorization|cookie|password|passwd|secret|token|api.?key|credential|header|request.?body|response.?body|stack/i;\n\nfunction sanitizeDetails(value, depth = 0) {\n  if (depth > 2) {\n    return '[TRUNCATED]';\n  }\n\n  if (\n    value === null ||\n    typeof value === 'boolean' ||\n    typeof value === 'number'\n  ) {\n    return value;\n  }\n\n  if (typeof value === 'string') {\n    return safeText(value, 500);\n  }\n\n  if (Array.isArray(value)) {\n    return value\n      .slice(0, 20)\n      .map((entry) => sanitizeDetails(entry, depth + 1));\n  }\n\n  if (typeof value === 'object') {\n    const result = {};\n\n    for (const [key, entry] of Object.entries(value).slice(0, 20)) {\n      if (blockedDetailKeyPattern.test(key)) {\n        result[key] = '[REDACTED]';\n        continue;\n      }\n\n      result[key] = sanitizeDetails(entry, depth + 1);\n    }\n\n    return result;\n  }\n\n  return safeText(value, 500);\n}\n\nconst sourceVariant = safeText(\n  input.source_variant,\n  80,\n  true,\n);\n\nif (sourceVariant === 'notification_retry') {\n  const allowedFields = new Set([\n    'source_variant',\n    'trigger_source',\n    'external_operation_id',\n  ]);\n\n  rejectUnknownFields(input, allowedFields);\n\n  if (input.trigger_source !== 'wf98') {\n    throw new Error(\n      'notification_retry trigger_source must equal wf98',\n    );\n  }\n\n  return [\n    {\n      json: {\n        source_variant: 'notification_retry',\n        trigger_source: 'wf98',\n        external_operation_id: optionalUuid(\n          input.external_operation_id,\n          'external_operation_id',\n        ),\n      },\n    },\n  ];\n}\n\nif (sourceVariant !== 'explicit_internal') {\n  throw new Error(\n    `Unsupported source_variant: ${sourceVariant}`,\n  );\n}\n\nconst allowedFields = new Set([\n  'source_variant',\n  'source_workflow_name',\n  'source_workflow_id',\n  'source_execution_id',\n  'case_id',\n  'correlation_id',\n  'step_id',\n  'submission_id',\n  'external_operation_id',\n  'error_class',\n  'error_code',\n  'error_message',\n  'retryable',\n  'severity',\n  'requires_intervention',\n  'error_details',\n]);\n\nrejectUnknownFields(input, allowedFields);\n\nif (typeof input.retryable !== 'boolean') {\n  throw new Error('retryable must be boolean');\n}\n\nif (typeof input.requires_intervention !== 'boolean') {\n  throw new Error('requires_intervention must be boolean');\n}\n\nconst allowedSeverities = new Set([\n  'warning',\n  'error',\n  'critical',\n]);\n\nif (!allowedSeverities.has(input.severity)) {\n  throw new Error(\n    'severity must be warning, error, or critical',\n  );\n}\n\nif (\n  input.error_details !== null &&\n  input.error_details !== undefined\n) {\n  assertPlainObject(input.error_details, 'error_details');\n}\n\nreturn [\n  {\n    json: {\n      source_variant: 'explicit_internal',\n\n      source_workflow_name: safeText(\n        input.source_workflow_name,\n        200,\n        true,\n      ),\n      source_workflow_id: safeText(\n        input.source_workflow_id,\n        120,\n      ),\n      source_execution_id: safeText(\n        input.source_execution_id,\n        120,\n      ),\n\n      case_id: optionalUuid(input.case_id, 'case_id'),\n      correlation_id: optionalUuid(\n        input.correlation_id,\n        'correlation_id',\n      ),\n      step_id: optionalUuid(input.step_id, 'step_id'),\n      submission_id: optionalUuid(\n        input.submission_id,\n        'submission_id',\n      ),\n      external_operation_id: optionalUuid(\n        input.external_operation_id,\n        'external_operation_id',\n      ),\n\n      error_class: safeText(\n        input.error_class,\n        120,\n        true,\n      ),\n      error_code: safeText(input.error_code, 120),\n      error_message: safeText(\n        input.error_message,\n        1000,\n        true,\n      ),\n\n      retryable: input.retryable,\n      severity: input.severity,\n      requires_intervention:\n        input.requires_intervention,\n\n      error_details: sanitizeDetails(\n        input.error_details ?? {},\n      ),\n\n      occurred_at: new Date().toISOString(),\n    },\n  },\n];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -384,
+        -208
+      ],
+      "id": "8481dd53-8c8d-4aec-bbcb-b7f21eed59fb",
+      "name": "Validate Internal Invocation"
+    },
+    {
+      "parameters": {
+        "rules": {
+          "values": [
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 3
+                },
+                "conditions": [
+                  {
+                    "leftValue": "={{ $json.source_variant }}",
+                    "rightValue": "explicit_internal",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    },
+                    "id": "12ea5ee4-b4df-425a-8453-344a2d8a2128"
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "explicit_internal"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 3
+                },
+                "conditions": [
+                  {
+                    "id": "8aed8f1b-7c9c-457d-8b3d-0def8f0a7820",
+                    "leftValue": "={{ $json.source_variant }}",
+                    "rightValue": "notification_retry",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals",
+                      "name": "filter.operator.equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "notification_retry"
+            }
+          ]
+        },
+        "options": {
+          "fallbackOutput": "extra"
+        }
+      },
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 3.4,
+      "position": [
+        -128,
+        -224
+      ],
+      "id": "9eceba9b-9c54-4c48-b8a7-e85496d81060",
+      "name": "Route Internal Invocation"
+    },
+    {
+      "parameters": {
+        "jsCode": "// WF99 derives a conservative technical-error classification\n// from the already sanitized n8n Error Trigger structure.\n//\n// Unknown errors are never marked retryable optimistically.\n\nconst items = $input.all();\n\nif (items.length !== 1) {\n  throw new Error(\n    `WF99 classification expected exactly one item, received ${items.length}`,\n  );\n}\n\nconst input = items[0].json ?? {};\n\nif (input.source_variant !== 'n8n_error_trigger') {\n  throw new Error(\n    'Classify Error Trigger Failure accepts only n8n_error_trigger input',\n  );\n}\n\nconst combined = [\n  input.error_name,\n  input.error_code,\n  input.error_message,\n  input.node_name,\n]\n  .filter((value) => value !== null && value !== undefined)\n  .join(' ')\n  .toLowerCase();\n\nlet errorClass = 'unknown_failure';\nlet retryable = false;\nlet severity = 'error';\nlet requiresIntervention = true;\n\n/**\n * Authentication and authorization failures require configuration\n * or permission correction and must not be retried automatically.\n */\nif (\n  /\\b401\\b|unauthenticated|authentication failed|invalid credential|invalid oauth|token expired/.test(\n    combined,\n  )\n) {\n  errorClass = 'authentication_failure';\n  retryable = false;\n  severity = 'critical';\n  requiresIntervention = true;\n} else if (\n  /\\b403\\b|forbidden|permission denied|not authorized|insufficient permission/.test(\n    combined,\n  )\n) {\n  errorClass = 'authorization_failure';\n  retryable = false;\n  severity = 'critical';\n  requiresIntervention = true;\n} else if (\n  /configuration|misconfigured|missing credential|missing environment|invalid configuration/.test(\n    combined,\n  )\n) {\n  errorClass = 'configuration_failure';\n  retryable = false;\n  severity = 'critical';\n  requiresIntervention = true;\n} else if (\n  /data integrity|foreign key|constraint violation|correlation mismatch|persisted-data inconsistency/.test(\n    combined,\n  )\n) {\n  errorClass = 'data_integrity_failure';\n  retryable = false;\n  severity = 'critical';\n  requiresIntervention = true;\n} else if (\n  /idempotency|duplicate logical operation|different operation/.test(\n    combined,\n  )\n) {\n  errorClass = 'idempotency_conflict';\n  retryable = false;\n  severity = 'critical';\n  requiresIntervention = true;\n} else if (\n  /decrypt|authentication tag|secret exposure|security policy|token material/.test(\n    combined,\n  )\n) {\n  errorClass = 'security_failure';\n  retryable = false;\n  severity = 'critical';\n  requiresIntervention = true;\n} else if (\n  /ambiguous|multiple matching|reconciliation failed|duplicate external side effect/.test(\n    combined,\n  )\n) {\n  errorClass = 'reconciliation_failure';\n  retryable = false;\n  severity = 'critical';\n  requiresIntervention = true;\n} else if (\n  /\\b429\\b|rate limit|too many requests/.test(combined)\n) {\n  errorClass = 'rate_limit_failure';\n  retryable = true;\n  severity = 'warning';\n  requiresIntervention = false;\n} else if (\n  /timeout|timed out|etimedout|\\b504\\b/.test(combined)\n) {\n  errorClass = 'timeout_failure';\n  retryable = true;\n  severity = 'warning';\n  requiresIntervention = false;\n} else if (\n  /econnreset|econnrefused|enotfound|dns|network|socket hang up|connection closed/.test(\n    combined,\n  )\n) {\n  errorClass = 'network_failure';\n  retryable = true;\n  severity = 'warning';\n  requiresIntervention = false;\n} else if (\n  /\\b502\\b|\\b503\\b|temporarily unavailable|service unavailable|provider unavailable/.test(\n    combined,\n  )\n) {\n  errorClass = 'integration_failure';\n  retryable = true;\n  severity = 'warning';\n  requiresIntervention = false;\n} else if (\n  /postgres|database|sql|connection pool/.test(combined)\n) {\n  errorClass = 'database_failure';\n  retryable = true;\n  severity = 'error';\n  requiresIntervention = false;\n} else if (\n  /dispatch|sub-workflow|queue|could not start workflow/.test(\n    combined,\n  )\n) {\n  errorClass = 'dispatch_failure';\n  retryable = true;\n  severity = 'warning';\n  requiresIntervention = false;\n} else if (\n  /workflow|node execution|execution failed/.test(combined)\n) {\n  errorClass = 'workflow_failure';\n  retryable = false;\n  severity = 'error';\n  requiresIntervention = true;\n}\n\nconst errorDetails = {\n  node_name: input.node_name ?? null,\n  provider_error_code: input.error_code ?? null,\n  source_variant: 'n8n_error_trigger',\n  requires_intervention: requiresIntervention,\n};\n\nreturn [\n  {\n    json: {\n      source_variant: 'n8n_error_trigger',\n\n      source_workflow_name:\n        input.source_workflow_name ?? 'unknown_workflow',\n      source_workflow_id:\n        input.source_workflow_id ?? null,\n      source_execution_id:\n        input.source_execution_id ?? null,\n\n      execution_url_present:\n        input.execution_url_present === true,\n\n      case_id: input.case_id ?? null,\n      correlation_id: input.correlation_id ?? null,\n      step_id: input.step_id ?? null,\n      submission_id: input.submission_id ?? null,\n      external_operation_id:\n        input.external_operation_id ?? null,\n\n      error_class: errorClass,\n      error_code: input.error_code ?? null,\n      error_message:\n        input.error_message ?? 'Unknown workflow failure',\n\n      retryable,\n      severity,\n      requires_intervention: requiresIntervention,\n      error_details: errorDetails,\n\n      occurred_at:\n        input.occurred_at ?? new Date().toISOString(),\n    },\n  },\n];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -144,
+        -16
+      ],
+      "id": "3c759598-8802-496f-89d9-54ada2e3407d",
+      "name": "Classify Error Trigger Failure"
+    },
+    {
+      "parameters": {},
+      "type": "n8n-nodes-base.merge",
+      "typeVersion": 3.2,
+      "position": [
+        208,
+        -80
+      ],
+      "id": "094cb7ba-269b-4236-b6e2-547beb5c9058",
+      "name": "Merge New Error Inputs"
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "WITH input AS (\n    SELECT\n        btrim($1::text) AS workflow_name,\n        NULLIF(btrim($2::text), '') AS workflow_id,\n        NULLIF(btrim($3::text), '') AS execution_id,\n\n        $4::uuid AS supplied_case_id,\n        $5::uuid AS supplied_correlation_id,\n        $6::uuid AS supplied_step_id,\n        $7::uuid AS supplied_submission_id,\n        $8::uuid AS supplied_external_operation_id,\n\n        btrim($9::text) AS error_class,\n        NULLIF(btrim($10::text), '') AS error_code,\n        left(btrim($11::text), 1000) AS error_message,\n\n        $12::boolean AS retryable,\n        btrim($13::text) AS severity,\n        $14::boolean AS requires_intervention,\n\n        COALESCE($15::jsonb, '{}'::jsonb) AS error_details,\n\n        btrim($16::text) AS recipient_email,\n        btrim($17::text) AS template_key,\n        $18::integer AS lease_seconds,\n        $19::integer AS max_attempts,\n        btrim($20::text) AS lease_owner\n),\nresolved AS (\n    SELECT\n        input.*,\n\n        onboarding_case.id AS valid_case_id,\n        onboarding_case.correlation_id\n            AS authoritative_correlation_id,\n\n        onboarding_step.id AS valid_step_id,\n        submission.id AS valid_submission_id,\n        external_operation.id\n            AS valid_external_operation_id,\n\n        (\n            input.supplied_case_id IS NOT NULL\n            AND onboarding_case.id IS NULL\n        ) AS case_invalid,\n\n        (\n            input.supplied_correlation_id IS NOT NULL\n            AND (\n                onboarding_case.id IS NULL\n                OR input.supplied_correlation_id\n                    IS DISTINCT FROM\n                    onboarding_case.correlation_id\n            )\n        ) AS correlation_invalid,\n\n        (\n            input.supplied_step_id IS NOT NULL\n            AND onboarding_step.id IS NULL\n        ) AS step_invalid,\n\n        (\n            input.supplied_submission_id IS NOT NULL\n            AND submission.id IS NULL\n        ) AS submission_invalid,\n\n        (\n            input.supplied_external_operation_id IS NOT NULL\n            AND external_operation.id IS NULL\n        ) AS operation_invalid\n\n    FROM input\n\n    LEFT JOIN onboarding_cases AS onboarding_case\n        ON onboarding_case.id = input.supplied_case_id\n\n    LEFT JOIN onboarding_steps AS onboarding_step\n        ON onboarding_step.id = input.supplied_step_id\n       AND (\n            input.supplied_case_id IS NULL\n            OR onboarding_step.case_id =\n                input.supplied_case_id\n       )\n\n    LEFT JOIN onboarding_submissions AS submission\n        ON submission.id = input.supplied_submission_id\n       AND (\n            input.supplied_case_id IS NULL\n            OR submission.case_id =\n                input.supplied_case_id\n       )\n\n    LEFT JOIN external_operations AS external_operation\n        ON external_operation.id =\n            input.supplied_external_operation_id\n       AND (\n            input.supplied_case_id IS NULL\n            OR external_operation.case_id IS NULL\n            OR external_operation.case_id =\n                input.supplied_case_id\n       )\n),\nnormalized AS (\n    SELECT\n        workflow_name,\n        workflow_id,\n        execution_id,\n\n        CASE\n            WHEN case_invalid OR correlation_invalid\n                THEN NULL\n            ELSE valid_case_id\n        END AS case_id,\n\n        CASE\n            WHEN step_invalid THEN NULL\n            ELSE valid_step_id\n        END AS step_id,\n\n        CASE\n            WHEN submission_invalid THEN NULL\n            ELSE valid_submission_id\n        END AS submission_id,\n\n        CASE\n            WHEN operation_invalid THEN NULL\n            ELSE valid_external_operation_id\n        END AS external_operation_id,\n\n        CASE\n            WHEN case_invalid OR correlation_invalid\n                THEN NULL\n            ELSE authoritative_correlation_id\n        END AS correlation_id,\n\n        CASE\n            WHEN (\n                case_invalid\n                OR correlation_invalid\n                OR step_invalid\n                OR submission_invalid\n                OR operation_invalid\n            )\n                THEN 'data_integrity_failure'\n            ELSE error_class\n        END AS error_class,\n\n        error_code,\n\n        CASE\n            WHEN (\n                case_invalid\n                OR correlation_invalid\n                OR step_invalid\n                OR submission_invalid\n                OR operation_invalid\n            )\n                THEN left(\n                    error_message\n                    || ' [context reference validation failed]',\n                    1000\n                )\n            ELSE error_message\n        END AS error_message,\n\n        CASE\n            WHEN (\n                case_invalid\n                OR correlation_invalid\n                OR step_invalid\n                OR submission_invalid\n                OR operation_invalid\n            )\n                THEN false\n            ELSE retryable\n        END AS retryable,\n\n        CASE\n            WHEN (\n                case_invalid\n                OR correlation_invalid\n                OR step_invalid\n                OR submission_invalid\n                OR operation_invalid\n            )\n                THEN 'critical'\n            ELSE severity\n        END AS severity,\n\n        (\n            requires_intervention\n            OR severity = 'critical'\n            OR case_invalid\n            OR correlation_invalid\n            OR step_invalid\n            OR submission_invalid\n            OR operation_invalid\n        ) AS requires_intervention,\n\n        error_details\n        || CASE\n            WHEN (\n                case_invalid\n                OR correlation_invalid\n                OR step_invalid\n                OR submission_invalid\n                OR operation_invalid\n            )\n                THEN jsonb_build_object(\n                    'context_reference_invalid',\n                    true\n                )\n            ELSE '{}'::jsonb\n        END AS error_details,\n\n        recipient_email,\n        template_key,\n        lease_seconds,\n        max_attempts,\n        lease_owner,\n\n        CASE\n            WHEN execution_id IS NULL THEN NULL\n            ELSE (\n                (\n                    'x'\n                    || substr(\n                        encode(\n                            digest(\n                                workflow_name\n                                || '|'\n                                || execution_id\n                                || '|'\n                                || error_class\n                                || '|'\n                                || COALESCE(error_code, '')\n                                || '|'\n                                || COALESCE(\n                                    valid_external_operation_id::text,\n                                    ''\n                                ),\n                                'sha256'\n                            ),\n                            'hex'\n                        ),\n                        1,\n                        16\n                    )\n                )::bit(64)::bigint\n            )\n        END AS advisory_lock_key,\n\n        (\n            recipient_email ~*\n                '^[A-Z0-9._%+-]+@[A-Z0-9.-]+\\.[A-Z]{2,}$'\n            AND template_key <> ''\n            AND lease_seconds > 0\n            AND max_attempts > 0\n            AND lease_owner <> ''\n        ) AS notification_config_valid\n\n    FROM resolved\n),\nlocked AS MATERIALIZED (\n    SELECT\n        normalized.*,\n        CASE\n            WHEN advisory_lock_key IS NOT NULL\n                THEN pg_advisory_xact_lock(\n                    advisory_lock_key\n                )\n            ELSE NULL\n        END AS lock_result\n    FROM normalized\n),\nexisting_error AS (\n    SELECT\n        error_log.id\n    FROM locked\n    JOIN error_log\n      ON locked.execution_id IS NOT NULL\n     AND error_log.workflow_name =\n         locked.workflow_name\n     AND error_log.execution_id =\n         locked.execution_id\n     AND error_log.error_class =\n         locked.error_class\n     AND error_log.error_code\n         IS NOT DISTINCT FROM locked.error_code\n     AND error_log.external_operation_id\n         IS NOT DISTINCT FROM\n         locked.external_operation_id\n    ORDER BY error_log.occurred_at\n    LIMIT 1\n),\ninserted_error AS (\n    INSERT INTO error_log (\n        case_id,\n        step_id,\n        submission_id,\n        external_operation_id,\n        workflow_name,\n        workflow_id,\n        execution_id,\n        error_class,\n        error_code,\n        error_message,\n        retryable,\n        severity,\n        error_details,\n        correlation_id,\n        occurred_at\n    )\n    SELECT\n        case_id,\n        step_id,\n        submission_id,\n        external_operation_id,\n        workflow_name,\n        workflow_id,\n        execution_id,\n        error_class,\n        error_code,\n        error_message,\n        retryable,\n        severity,\n        error_details,\n        correlation_id,\n        clock_timestamp()\n    FROM locked\n    WHERE NOT EXISTS (\n        SELECT 1\n        FROM existing_error\n    )\n    RETURNING id\n),\nerror_identity AS (\n    SELECT\n        id AS error_id,\n        true AS error_inserted\n    FROM inserted_error\n\n    UNION ALL\n\n    SELECT\n        id AS error_id,\n        false AS error_inserted\n    FROM existing_error\n    WHERE NOT EXISTS (\n        SELECT 1\n        FROM inserted_error\n    )\n),\noperation_identity AS (\n    SELECT\n        error_identity.error_id,\n        error_identity.error_inserted,\n        locked.*,\n        (\n            'error:'\n            || error_identity.error_id::text\n            || ':notify-operator-intervention'\n        ) AS idempotency_key\n    FROM error_identity\n    CROSS JOIN locked\n),\noperation_payload AS (\n    SELECT\n        operation_identity.*,\n\n        (\n            'b2b-error-'\n            || substr(\n                encode(\n                    digest(\n                        idempotency_key,\n                        'sha256'\n                    ),\n                    'hex'\n                ),\n                1,\n                24\n            )\n        ) AS message_marker\n    FROM operation_identity\n),\nnotification_claim AS MATERIALIZED (\n    SELECT\n        operation_payload.error_id,\n        claimed.*\n\n    FROM operation_payload\n\n    CROSS JOIN LATERAL claim_external_operation(\n        operation_payload.idempotency_key,\n        'notify_operator_intervention',\n        operation_payload.case_id,\n        operation_payload.lease_owner,\n        operation_payload.lease_seconds,\n        operation_payload.max_attempts,\n        jsonb_strip_nulls(\n            jsonb_build_object(\n                'error_id',\n                operation_payload.error_id,\n                'recipient_email',\n                operation_payload.recipient_email,\n                'template_key',\n                operation_payload.template_key,\n                'severity',\n                operation_payload.severity,\n                'source_workflow_name',\n                operation_payload.workflow_name,\n                'case_id',\n                operation_payload.case_id,\n                'correlation_id',\n                operation_payload.correlation_id,\n                'message_marker',\n                operation_payload.message_marker\n            )\n        )\n    ) AS claimed\n\n    WHERE operation_payload.requires_intervention\n      AND operation_payload.notification_config_valid\n)\nSELECT\n    operation_payload.error_id,\n    operation_payload.error_inserted,\n\n    operation_payload.error_class,\n    operation_payload.error_code,\n    operation_payload.retryable,\n    operation_payload.severity,\n    operation_payload.requires_intervention,\n\n    CASE\n        WHEN NOT operation_payload.requires_intervention\n            THEN 'not_required'\n        WHEN NOT operation_payload.notification_config_valid\n            THEN 'configuration_invalid'\n        ELSE notification_claim.claim_outcome\n    END AS notification_claim_outcome,\n\n    notification_claim.operation_id\n        AS notification_operation_id,\n\n    notification_claim.operation_status\n        AS notification_operation_status,\n\n    notification_claim.current_attempt_count\n        AS notification_attempt_count,\n\n    notification_claim.current_lease_expires_at\n        AS notification_lease_expires_at\n\nFROM operation_payload\n\nLEFT JOIN notification_claim\n    ON notification_claim.error_id =\n       operation_payload.error_id;",
+        "options": {
+          "queryReplacement": "={{\n[\n  $json.source_workflow_name,\n  $json.source_workflow_id,\n  $json.source_execution_id,\n\n  $json.case_id,\n  $json.correlation_id,\n  $json.step_id,\n  $json.submission_id,\n  $json.external_operation_id,\n\n  $json.error_class,\n  $json.error_code,\n  $json.error_message,\n\n  $json.retryable,\n  $json.severity,\n  $json.requires_intervention,\n\n  JSON.stringify($json.error_details ?? {}),\n\n  $env.OPERATOR_INTERVENTION_RECIPIENT_EMAIL,\n  $env.OPERATOR_INTERVENTION_TEMPLATE_KEY\n    ?? 'operator_intervention_v1',\n\n  Number(\n    $env.WF99_NOTIFICATION_LEASE_SECONDS ?? 300\n  ),\n\n  Number(\n    $env.WF99_NOTIFICATION_MAX_ATTEMPTS ?? 5\n  ),\n\n  `WF99:${$execution.id}`\n]\n}}"
+        }
+      },
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        416,
+        -80
+      ],
+      "id": "954a5b75-b6e0-46c6-840c-f92beabce3b1",
+      "name": "Persist Error and Claim Notification",
+      "credentials": {
+        "postgres": {
+          "id": "zU4wPvkQFRBSwH0b",
+          "name": "B2B Onboarding App DB"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "rules": {
+          "values": [
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 3
+                },
+                "conditions": [
+                  {
+                    "leftValue": "={{ $json.notification_claim_outcome }}",
+                    "rightValue": "claimed",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    },
+                    "id": "b56fa20c-c9d2-422f-8dd9-c223a4029d28"
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "claimed"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 3
+                },
+                "conditions": [
+                  {
+                    "id": "70c175f8-b7d6-4893-af05-d97e0204d3b5",
+                    "leftValue": "={{ $json.notification_claim_outcome }}",
+                    "rightValue": "reuse_succeeded",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "reuse_succeeded"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 3
+                },
+                "conditions": [
+                  {
+                    "id": "3749c140-7a96-4b49-b578-f82dbc1b691e",
+                    "leftValue": "={{ $json.notification_claim_outcome }}",
+                    "rightValue": "not_required",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "not_required"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 3
+                },
+                "conditions": [
+                  {
+                    "id": "2dc08f33-1c3a-49bb-b6cc-504dfe490d18",
+                    "leftValue": "={{ $json.notification_claim_outcome }}",
+                    "rightValue": "busy",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "busy"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 3
+                },
+                "conditions": [
+                  {
+                    "id": "3d7aba52-5947-49cc-bedb-d0e6b32219e4",
+                    "leftValue": "={{ $json.notification_claim_outcome }}",
+                    "rightValue": "not_due",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "not_due"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 3
+                },
+                "conditions": [
+                  {
+                    "id": "aac33fd6-18e3-4fc7-89f1-f41e617bbb02",
+                    "leftValue": "={{ $json.notification_claim_outcome }}",
+                    "rightValue": "refused_terminal",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "refused_terminal"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 3
+                },
+                "conditions": [
+                  {
+                    "id": "36650cc4-fc75-4843-8d2a-59041b194450",
+                    "leftValue": "={{ $json.notification_claim_outcome }}",
+                    "rightValue": "refused_exhausted",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "refused_exhausted"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 3
+                },
+                "conditions": [
+                  {
+                    "id": "75287c82-9199-4946-b3ad-9a95db1d75af",
+                    "leftValue": "={{ $json.notification_claim_outcome }}",
+                    "rightValue": "configuration_invalid",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "configuration_invalid"
+            }
+          ]
+        },
+        "options": {
+          "fallbackOutput": "extra"
+        }
+      },
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 3.4,
+      "position": [
+        624,
+        -192
+      ],
+      "id": "1207c933-f5a2-4d9a-9bad-7772a2b0e392",
+      "name": "Route Notification Claim Outcome"
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT\n    operation.id AS notification_operation_id,\n    operation.status AS notification_operation_status,\n    operation.attempt_count AS notification_attempt_count,\n    operation.max_attempts AS notification_max_attempts,\n    operation.lease_expires_at,\n\n    operation.request_summary ->> 'recipient_email'\n        AS recipient_email,\n    operation.request_summary ->> 'template_key'\n        AS template_key,\n    operation.request_summary ->> 'message_marker'\n        AS message_marker,\n\n    error_record.id AS error_id,\n    error_record.workflow_name AS source_workflow_name,\n    error_record.error_class,\n    error_record.error_code,\n    error_record.error_message,\n    error_record.severity,\n    error_record.case_id,\n    error_record.correlation_id,\n    error_record.external_operation_id\n        AS source_external_operation_id,\n    error_record.occurred_at,\n\n    (\n        operation.status = 'in_progress'\n        AND operation.lease_owner = $2::text\n        AND operation.lease_expires_at > clock_timestamp()\n    ) AS lease_owned\n\nFROM external_operations AS operation\n\nJOIN error_log AS error_record\n    ON error_record.id =\n       (operation.request_summary ->> 'error_id')::uuid\n\nWHERE operation.id = $1::uuid\n  AND operation.operation_type =\n      'notify_operator_intervention';",
+        "options": {
+          "queryReplacement": "={{ [   $json.notification_operation_id,   `WF99:${$execution.id}` ] }}"
+        }
+      },
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        800,
+        -384
+      ],
+      "id": "661dce84-7245-4ef3-9aae-fe4536a60c48",
+      "name": "Load Claimed Notification Context",
+      "credentials": {
+        "postgres": {
+          "id": "zU4wPvkQFRBSwH0b",
+          "name": "B2B Onboarding App DB"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "fd0eed23-b23d-45d2-ae8a-274017e4e9a2",
+              "leftValue": "={{ $json.lease_owned }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        1008,
+        -384
+      ],
+      "id": "b865f8f0-ad0e-413f-8f8d-c05b00842747",
+      "name": "IfLease Still Owned?"
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "const input = $json;\n\nconst requiredFields = [\n  'notification_operation_id',\n  'recipient_email',\n  'message_marker',\n  'error_id',\n  'source_workflow_name',\n  'error_class',\n  'error_message',\n  'severity',\n  'occurred_at',\n];\n\nfor (const field of requiredFields) {\n  const value = input[field];\n\n  if (value === null || value === undefined || String(value).trim() === '') {\n    throw new Error(`Missing required notification field: ${field}`);\n  }\n}\n\nconst recipientEmail = String(input.recipient_email).trim();\n\nif (\n  !/^[A-Z0-9._%+-]+@[A-Z0-9.-]+\\.[A-Z]{2,}$/i.test(\n    recipientEmail\n  )\n) {\n  throw new Error('Invalid operator notification recipient email');\n}\n\nconst displayValue = (value) => {\n  if (value === null || value === undefined || value === '') {\n    return 'Not provided';\n  }\n\n  return String(value);\n};\n\nconst escapeHtml = (value) => {\n  return displayValue(value)\n    .replaceAll('&', '&amp;')\n    .replaceAll('<', '&lt;')\n    .replaceAll('>', '&gt;')\n    .replaceAll('\"', '&quot;')\n    .replaceAll(\"'\", '&#039;');\n};\n\nconst severity = String(input.severity).toUpperCase();\n\nconst subject =\n  `[${severity}] B2B onboarding operator intervention required`;\n\nconst textBody = [\n  'A B2B onboarding workflow requires operator intervention.',\n  '',\n  `Severity: ${severity}`,\n  `Source workflow: ${displayValue(input.source_workflow_name)}`,\n  `Error class: ${displayValue(input.error_class)}`,\n  `Error code: ${displayValue(input.error_code)}`,\n  `Error message: ${displayValue(input.error_message)}`,\n  `Occurred at: ${displayValue(input.occurred_at)}`,\n  '',\n  `Case ID: ${displayValue(input.case_id)}`,\n  `Correlation ID: ${displayValue(input.correlation_id)}`,\n  `Source operation ID: ${displayValue(\n    input.source_external_operation_id\n  )}`,\n  '',\n  `Error ID: ${displayValue(input.error_id)}`,\n  `Notification operation ID: ${displayValue(\n    input.notification_operation_id\n  )}`,\n  `Notification attempt: ${displayValue(\n    input.notification_attempt_count\n  )}/${displayValue(input.notification_max_attempts)}`,\n  '',\n  `Message marker: ${displayValue(input.message_marker)}`,\n].join('\\n');\n\nconst htmlBody = `\n<div style=\"font-family: Arial, sans-serif; line-height: 1.5;\">\n  <h2>B2B onboarding operator intervention required</h2>\n\n  <table cellpadding=\"6\" cellspacing=\"0\" border=\"0\">\n    <tr>\n      <td><strong>Severity</strong></td>\n      <td>${escapeHtml(severity)}</td>\n    </tr>\n    <tr>\n      <td><strong>Source workflow</strong></td>\n      <td>${escapeHtml(input.source_workflow_name)}</td>\n    </tr>\n    <tr>\n      <td><strong>Error class</strong></td>\n      <td>${escapeHtml(input.error_class)}</td>\n    </tr>\n    <tr>\n      <td><strong>Error code</strong></td>\n      <td>${escapeHtml(input.error_code)}</td>\n    </tr>\n    <tr>\n      <td><strong>Error message</strong></td>\n      <td>${escapeHtml(input.error_message)}</td>\n    </tr>\n    <tr>\n      <td><strong>Occurred at</strong></td>\n      <td>${escapeHtml(input.occurred_at)}</td>\n    </tr>\n    <tr>\n      <td><strong>Case ID</strong></td>\n      <td>${escapeHtml(input.case_id)}</td>\n    </tr>\n    <tr>\n      <td><strong>Correlation ID</strong></td>\n      <td>${escapeHtml(input.correlation_id)}</td>\n    </tr>\n    <tr>\n      <td><strong>Source operation ID</strong></td>\n      <td>${escapeHtml(input.source_external_operation_id)}</td>\n    </tr>\n    <tr>\n      <td><strong>Error ID</strong></td>\n      <td>${escapeHtml(input.error_id)}</td>\n    </tr>\n    <tr>\n      <td><strong>Notification operation ID</strong></td>\n      <td>${escapeHtml(input.notification_operation_id)}</td>\n    </tr>\n    <tr>\n      <td><strong>Notification attempt</strong></td>\n      <td>${escapeHtml(\n        input.notification_attempt_count\n      )}/${escapeHtml(input.notification_max_attempts)}</td>\n    </tr>\n  </table>\n\n  <p style=\"font-size: 12px; color: #666;\">\n    ${escapeHtml(input.message_marker)}\n  </p>\n</div>\n`.trim();\n\nreturn {\n  json: {\n    ...input,\n    recipient_email: recipientEmail,\n    email_subject: subject,\n    email_text: textBody,\n    email_html: htmlBody,\n  },\n};\n"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1216,
+        -480
+      ],
+      "id": "60077564-0e5e-466c-847c-2ef7d0efe8e0",
+      "name": "Build Operator Intervention Email"
+    },
+    {
+      "parameters": {
+        "operation": "getAll",
+        "limit": 1,
+        "filters": {
+          "q": "={{ `in:sent \"${$json.message_marker}\"` }}"
+        }
+      },
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.2,
+      "position": [
+        1440,
+        -352
+      ],
+      "id": "d95bf20b-9e28-4c48-93f6-8c38bc3537c7",
+      "name": "Search Existing Operator Notification",
+      "webhookId": "cd200169-7cc4-4c6a-bc20-16a52c1b327f",
+      "alwaysOutputData": true,
+      "credentials": {
+        "gmailOAuth2": {
+          "id": "LcK92xSDT34cJaIK",
+          "name": "Gmail account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "mode": "combine",
+        "combineBy": "combineByPosition",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.merge",
+      "typeVersion": 3.2,
+      "position": [
+        1648,
+        -464
+      ],
+      "id": "bc3ef1b4-7cfa-405b-aaa9-5a2d3c88d66a",
+      "name": "Merge Notification Search Context"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "74821af7-5355-4dfb-a444-a0fd33a7e4d6",
+              "leftValue": "={{ Boolean($json.id) }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        1856,
+        -464
+      ],
+      "id": "f0d1f2da-66e0-4018-8369-32d805907b70",
+      "name": "Existing Notification Found?"
+    },
+    {
+      "parameters": {
+        "sendTo": "={{ $json.recipient_email }}",
+        "subject": "={{ $json.email_subject }}",
+        "message": "={{ $json.email_html }}",
+        "options": {
+          "appendAttribution": false,
+          "senderName": "={{ $env.OPERATOR_INTERVENTION_SENDER_NAME ?? 'B2B Onboarding Platform' }}"
+        }
+      },
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.2,
+      "position": [
+        2128,
+        -208
+      ],
+      "id": "1481b2fe-9cc8-4e5f-bb6d-ea9694a9557f",
+      "name": "Send Operator Intervention Notification",
+      "webhookId": "22afed72-4cc4-4e78-a15b-2f897db3fff0",
+      "credentials": {
+        "gmailOAuth2": {
+          "id": "LcK92xSDT34cJaIK",
+          "name": "Gmail account"
+        }
+      },
+      "onError": "continueErrorOutput"
+    },
+    {
+      "parameters": {
+        "mode": "combine",
+        "combineBy": "combineByPosition",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.merge",
+      "typeVersion": 3.2,
+      "position": [
+        2256,
+        -432
+      ],
+      "id": "60283d9f-48b1-4702-a503-17121305b7ac",
+      "name": "Merge Sent Notification Context"
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT complete_external_operation_success(\n    $1::uuid,\n    $2::text,\n    NULLIF($3::text, ''),\n    $4::jsonb\n) AS operation_completed;",
+        "options": {
+          "queryReplacement": "={{ [   $json.notification_operation_id,   `WF99:${$execution.id}`,   $json.id ?? '',   JSON.stringify({     provider: 'gmail',     gmail_message_id: $json.id ?? null,     gmail_thread_id: $json.threadId ?? null,     recipient_email: $json.recipient_email,     message_marker: $json.message_marker,     sent_at: $now.toISO()   }) ] }}"
+        }
+      },
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        2464,
+        -432
+      ],
+      "id": "ada4f887-2f64-4792-b2a6-6dca449d46c9",
+      "name": "Complete Notification Success",
+      "credentials": {
+        "postgres": {
+          "id": "zU4wPvkQFRBSwH0b",
+          "name": "B2B Onboarding App DB"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT complete_external_operation_success(\n    $1::uuid,\n    $2::text,\n    NULLIF($3::text, ''),\n    $4::jsonb\n) AS operation_completed;",
+        "options": {
+          "queryReplacement": "={{ [   $json.notification_operation_id,   `WF99:${$execution.id}`,   $json.id ?? '',   JSON.stringify({     provider: 'gmail',     delivery_reconciled: true,     gmail_message_id: $json.id ?? null,     gmail_thread_id: $json.threadId ?? null,     recipient_email: $json.recipient_email,     message_marker: $json.message_marker,     reconciled_at: $now.toISO()   }) ] }}"
+        }
+      },
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        2064,
+        -656
+      ],
+      "id": "b3abc87b-b241-4bf9-9326-8e320c06edd2",
+      "name": "Complete Reconciled Notification Success",
+      "credentials": {
+        "postgres": {
+          "id": "zU4wPvkQFRBSwH0b",
+          "name": "B2B Onboarding App DB"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "mode": "combine",
+        "combineBy": "combineByPosition",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.merge",
+      "typeVersion": 3.2,
+      "position": [
+        2400,
+        -208
+      ],
+      "id": "3a4f1522-c63b-4fa9-8c2d-b539391c4b30",
+      "name": "Merge Notification Failure Context"
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "const input = $json;\n\nconst error =\n  input.error && typeof input.error === 'object'\n    ? input.error\n    : {};\n\nconst cause =\n  error.cause && typeof error.cause === 'object'\n    ? error.cause\n    : {};\n\nfunction firstNonEmpty(...values) {\n  for (const value of values) {\n    if (value === null || value === undefined) {\n      continue;\n    }\n\n    const text = String(value).trim();\n\n    if (text !== '') {\n      return text;\n    }\n  }\n\n  return null;\n}\n\nfunction redactSecrets(value) {\n  if (!value) {\n    return null;\n  }\n\n  return String(value)\n    .replace(\n      /(authorization:\\s*bearer\\s+)[^\\s]+/gi,\n      '$1[REDACTED]'\n    )\n    .replace(\n      /((?:access|refresh|id)_token[\"'\\s:=]+)[^\\s,\"'}]+/gi,\n      '$1[REDACTED]'\n    )\n    .replace(\n      /(client_secret[\"'\\s:=]+)[^\\s,\"'}]+/gi,\n      '$1[REDACTED]'\n    )\n    .slice(0, 1000);\n}\n\nconst rawStatusCode = firstNonEmpty(\n  error.httpCode,\n  error.statusCode,\n  error.status,\n  cause.httpCode,\n  cause.statusCode,\n  cause.status,\n  input.httpCode,\n  input.statusCode\n);\n\nconst parsedStatusCode = Number(rawStatusCode);\n\nconst statusCode =\n  Number.isInteger(parsedStatusCode) &&\n  parsedStatusCode >= 100 &&\n  parsedStatusCode <= 599\n    ? parsedStatusCode\n    : null;\n\nconst rawMessage = firstNonEmpty(\n  error.message,\n  error.description,\n  cause.message,\n  cause.description,\n  input.message,\n  'Gmail notification delivery failed'\n);\n\nconst errorMessage =\n  redactSecrets(rawMessage) ??\n  'Gmail notification delivery failed';\n\nconst searchableText = [\n  error.name,\n  error.code,\n  error.message,\n  error.description,\n  cause.name,\n  cause.code,\n  cause.message,\n  cause.description\n]\n  .filter(value => value !== null && value !== undefined)\n  .join(' ')\n  .toLowerCase();\n\nconst isAuthenticationFailure =\n  statusCode === 401 ||\n  searchableText.includes('invalid_grant') ||\n  searchableText.includes('unauthenticated') ||\n  searchableText.includes('invalid credential') ||\n  searchableText.includes('authentication failed');\n\nconst isAuthorizationFailure =\n  statusCode === 403 ||\n  searchableText.includes('permission denied') ||\n  searchableText.includes('permission_denied') ||\n  searchableText.includes('forbidden') ||\n  searchableText.includes('insufficient permission');\n\nconst isRateLimitFailure =\n  statusCode === 429 ||\n  searchableText.includes('rate limit') ||\n  searchableText.includes('rate_limit') ||\n  searchableText.includes('quota exceeded') ||\n  searchableText.includes('too many requests');\n\nconst isTimeoutFailure =\n  statusCode === 408 ||\n  searchableText.includes('timeout') ||\n  searchableText.includes('timed out') ||\n  searchableText.includes('etimedout') ||\n  searchableText.includes('socket hang up');\n\nconst isNetworkFailure =\n  searchableText.includes('econnreset') ||\n  searchableText.includes('econnrefused') ||\n  searchableText.includes('enotfound') ||\n  searchableText.includes('network error') ||\n  searchableText.includes('connection reset');\n\nconst isProviderFailure =\n  statusCode !== null &&\n  statusCode >= 500 &&\n  statusCode <= 599;\n\nlet failureClass = 'notification_delivery_failure';\nlet transportRetryable = false;\n\nif (isAuthenticationFailure) {\n  failureClass = 'authentication_failure';\n} else if (isAuthorizationFailure) {\n  failureClass = 'authorization_failure';\n} else if (isRateLimitFailure) {\n  failureClass = 'rate_limit_failure';\n  transportRetryable = true;\n} else if (isTimeoutFailure) {\n  failureClass = 'timeout_failure';\n  transportRetryable = true;\n} else if (isNetworkFailure) {\n  failureClass = 'integration_failure';\n  transportRetryable = true;\n} else if (isProviderFailure) {\n  failureClass = 'provider_failure';\n  transportRetryable = true;\n}\n\nconst attemptCount = Number(\n  input.notification_attempt_count ?? 0\n);\n\nconst maxAttempts = Number(\n  input.notification_max_attempts ?? 1\n);\n\nconst retryAllowed =\n  transportRetryable &&\n  attemptCount < maxAttempts;\n\n// 5, 10, 20, 40, then maximum 60 minutes.\nconst retryDelayMinutes = Math.min(\n  5 * Math.pow(\n    2,\n    Math.max(attemptCount - 1, 0)\n  ),\n  60\n);\n\nconst nextRetryAt = retryAllowed\n  ? new Date(\n      Date.now() + retryDelayMinutes * 60 * 1000\n    ).toISOString()\n  : null;\n\nreturn {\n  json: {\n    ...input,\n\n    notification_failure_class: failureClass,\n    notification_failure_message: errorMessage,\n    notification_failure_status_code: statusCode,\n\n    notification_failure_retryable: retryAllowed,\n    notification_next_retry_at: nextRetryAt,\n\n    notification_failure_summary: {\n      provider: 'gmail',\n      failure_class: failureClass,\n      status_code: statusCode,\n      message: errorMessage,\n      attempt_count: attemptCount,\n      max_attempts: maxAttempts,\n      retry_allowed: retryAllowed,\n      message_marker:\n        input.message_marker ?? null\n    }\n  }\n};"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2608,
+        -208
+      ],
+      "id": "0d19b04a-6402-4a14-9708-fec27f4cd7a6",
+      "name": "Classify Notification Delivery Failure"
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT complete_external_operation_failure(\n    $1::uuid,\n    $2::text,\n    $3::boolean,\n    $4::text,\n    $5::jsonb,\n    $6::timestamptz\n) AS failure_outcome;",
+        "options": {
+          "queryReplacement": "={{ [   $json.notification_operation_id,   `WF99:${$execution.id}`,   $json.notification_failure_retryable,   $json.notification_failure_class,   JSON.stringify(     $json.notification_failure_summary ?? {}   ),   $json.notification_next_retry_at ] }}"
+        }
+      },
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        2816,
+        -208
+      ],
+      "id": "713947e4-9b2b-4e68-a0af-15de04023e94",
+      "name": "Complete Notification Failure",
+      "credentials": {
+        "postgres": {
+          "id": "zU4wPvkQFRBSwH0b",
+          "name": "B2B Onboarding App DB"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "WITH target_operation AS MATERIALIZED (\n    SELECT\n        operation.id,\n        operation.idempotency_key,\n        operation.operation_type,\n        operation.case_id,\n        operation.max_attempts,\n        operation.request_summary\n    FROM external_operations AS operation\n    WHERE operation.id = $1::uuid\n      AND operation.operation_type =\n          'notify_operator_intervention'\n),\nclaimed_operation AS MATERIALIZED (\n    SELECT\n        claimed.*\n    FROM target_operation\n\n    CROSS JOIN LATERAL claim_external_operation(\n        target_operation.idempotency_key,\n        target_operation.operation_type,\n        target_operation.case_id,\n        $2::text,\n        $3::integer,\n        target_operation.max_attempts,\n        target_operation.request_summary\n    ) AS claimed\n)\nSELECT\n    COALESCE(\n        claimed_operation.operation_id,\n        $1::uuid\n    ) AS notification_operation_id,\n\n    CASE\n        WHEN target_operation.id IS NULL\n            THEN 'operation_not_found'\n        ELSE claimed_operation.claim_outcome\n    END AS notification_claim_outcome,\n\n    claimed_operation.operation_status\n        AS notification_operation_status,\n\n    claimed_operation.current_attempt_count\n        AS notification_attempt_count,\n\n    claimed_operation.current_lease_expires_at\n        AS notification_lease_expires_at\n\nFROM (SELECT 1) AS seed\n\nLEFT JOIN target_operation\n    ON true\n\nLEFT JOIN claimed_operation\n    ON true;",
+        "options": {
+          "queryReplacement": "={{ [   $json.notification_operation_id     ?? $json.external_operation_id,    `WF99:${$execution.id}`,    Number(     $env.WF99_NOTIFICATION_LEASE_SECONDS ?? 300   ) ] }}"
+        }
+      },
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        208,
+        -208
+      ],
+      "id": "534c8dfc-e4b1-41fd-b93c-08b016755991",
+      "name": "Claim Retried Notification",
+      "credentials": {
+        "postgres": {
+          "id": "zU4wPvkQFRBSwH0b",
+          "name": "B2B Onboarding App DB"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "const input = $json;\n\nconst leaseOwned =\n  typeof input.lease_owned === 'boolean'\n    ? input.lease_owned\n    : null;\n\nconst operationStatus =\n  input.notification_operation_status ??\n  input.operation_status ??\n  null;\n\nlet outcome = String(\n  input.notification_claim_outcome ?? ''\n).trim();\n\nif (outcome === '' && leaseOwned === false) {\n  outcome = 'lease_not_owned';\n}\n\nif (outcome === '') {\n  outcome = 'unexpected';\n}\n\nlet handlerStatus;\nlet completed;\nlet deferred;\nlet failureReason = null;\nlet notificationSent = false;\n\nif (leaseOwned === false) {\n  if (operationStatus === 'succeeded') {\n    handlerStatus = 'completed';\n    completed = true;\n    deferred = false;\n    notificationSent = true;\n  } else if (operationStatus === 'failed_terminal') {\n    handlerStatus = 'failed_terminal';\n    completed = false;\n    deferred = false;\n    failureReason = 'notification_operation_terminal';\n  } else {\n    handlerStatus = 'deferred';\n    completed = false;\n    deferred = true;\n    failureReason = 'notification_lease_not_owned';\n  }\n} else {\n  switch (outcome) {\n    case 'reuse_succeeded':\n      handlerStatus = 'completed';\n      completed = true;\n      deferred = false;\n      notificationSent = true;\n      break;\n\n    case 'not_required':\n      handlerStatus = 'completed';\n      completed = true;\n      deferred = false;\n      break;\n\n    case 'busy':\n      handlerStatus = 'deferred';\n      completed = false;\n      deferred = true;\n      break;\n\n    case 'not_due':\n      handlerStatus = 'deferred';\n      completed = false;\n      deferred = true;\n      break;\n\n    case 'refused_terminal':\n      handlerStatus = 'failed_terminal';\n      completed = false;\n      deferred = false;\n      failureReason = 'notification_operation_terminal';\n      break;\n\n    case 'refused_exhausted':\n      handlerStatus = 'failed_terminal';\n      completed = false;\n      deferred = false;\n      failureReason = 'notification_attempts_exhausted';\n      break;\n\n    case 'configuration_invalid':\n      handlerStatus = 'failed_terminal';\n      completed = false;\n      deferred = false;\n      failureReason =\n        'notification_configuration_invalid';\n      break;\n\n    case 'operation_not_found':\n      handlerStatus = 'failed_terminal';\n      completed = false;\n      deferred = false;\n      failureReason =\n        'notification_operation_not_found';\n      break;\n\n    default:\n      handlerStatus = 'unexpected';\n      completed = false;\n      deferred = false;\n      failureReason =\n        'unexpected_notification_claim_outcome';\n      break;\n  }\n}\n\nconst notificationRequired =\n  typeof input.requires_intervention === 'boolean'\n    ? input.requires_intervention\n    : input.notification_operation_id !== null &&\n      input.notification_operation_id !== undefined;\n\nreturn {\n  json: {\n    workflow_name: 'WF99 — Central Error Handler',\n\n    handler_status: handlerStatus,\n    handler_completed: completed,\n    handler_deferred: deferred,\n\n    error_id: input.error_id ?? null,\n    error_class: input.error_class ?? null,\n    severity: input.severity ?? null,\n\n    notification_required: notificationRequired,\n    notification_sent: notificationSent,\n\n    notification_claim_outcome: outcome,\n\n    notification_operation_id:\n      input.notification_operation_id ?? null,\n\n    notification_operation_status:\n      operationStatus,\n\n    notification_attempt_count:\n      input.notification_attempt_count ?? null,\n\n    notification_lease_expires_at:\n      input.notification_lease_expires_at ??\n      input.lease_expires_at ??\n      null,\n\n    failure_reason: failureReason\n  }\n};"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1360,
+        -64
+      ],
+      "id": "4e2fb5ad-bd9b-441b-b84f-a613708b7364",
+      "name": "Build Non-Delivery Outcome"
+    }
+  ],
+  "connections": {
+    "Error Trigger": {
+      "main": [
+        [
+          {
+            "node": "Normalize Error Trigger Event",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Normalize Error Trigger Event": {
+      "main": [
+        [
+          {
+            "node": "Classify Error Trigger Failure",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Internal Invocation Trigger": {
+      "main": [
+        [
+          {
+            "node": "Validate Internal Invocation",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Validate Internal Invocation": {
+      "main": [
+        [
+          {
+            "node": "Route Internal Invocation",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Classify Error Trigger Failure": {
+      "main": [
+        [
+          {
+            "node": "Merge New Error Inputs",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Route Internal Invocation": {
+      "main": [
+        [
+          {
+            "node": "Merge New Error Inputs",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Claim Retried Notification",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Merge New Error Inputs": {
+      "main": [
+        [
+          {
+            "node": "Persist Error and Claim Notification",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Persist Error and Claim Notification": {
+      "main": [
+        [
+          {
+            "node": "Route Notification Claim Outcome",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Route Notification Claim Outcome": {
+      "main": [
+        [
+          {
+            "node": "Load Claimed Notification Context",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Build Non-Delivery Outcome",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Build Non-Delivery Outcome",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Build Non-Delivery Outcome",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Build Non-Delivery Outcome",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Build Non-Delivery Outcome",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Build Non-Delivery Outcome",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Build Non-Delivery Outcome",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Build Non-Delivery Outcome",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Load Claimed Notification Context": {
+      "main": [
+        [
+          {
+            "node": "IfLease Still Owned?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "IfLease Still Owned?": {
+      "main": [
+        [
+          {
+            "node": "Build Operator Intervention Email",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Build Non-Delivery Outcome",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Operator Intervention Email": {
+      "main": [
+        [
+          {
+            "node": "Search Existing Operator Notification",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Merge Notification Search Context",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Search Existing Operator Notification": {
+      "main": [
+        [
+          {
+            "node": "Merge Notification Search Context",
+            "type": "main",
+            "index": 1
+          }
+        ]
+      ]
+    },
+    "Merge Notification Search Context": {
+      "main": [
+        [
+          {
+            "node": "Existing Notification Found?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Existing Notification Found?": {
+      "main": [
+        [
+          {
+            "node": "Complete Reconciled Notification Success",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Send Operator Intervention Notification",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Merge Sent Notification Context",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Merge Notification Failure Context",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Send Operator Intervention Notification": {
+      "main": [
+        [
+          {
+            "node": "Merge Sent Notification Context",
+            "type": "main",
+            "index": 1
+          }
+        ],
+        [
+          {
+            "node": "Merge Notification Failure Context",
+            "type": "main",
+            "index": 1
+          }
+        ]
+      ]
+    },
+    "Merge Sent Notification Context": {
+      "main": [
+        [
+          {
+            "node": "Complete Notification Success",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Merge Notification Failure Context": {
+      "main": [
+        [
+          {
+            "node": "Classify Notification Delivery Failure",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Classify Notification Delivery Failure": {
+      "main": [
+        [
+          {
+            "node": "Complete Notification Failure",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Claim Retried Notification": {
+      "main": [
+        [
+          {
+            "node": "Route Notification Claim Outcome",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": true,
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate",
+    "availableInMCP": false
+  },
+  "nodeGroups": [],
+  "tags": []
+}
