@@ -16,7 +16,7 @@ BACKUP_PATH="$BACKUP_DIR/WF02-${WORKFLOW_ID}-$(date +%Y%m%d-%H%M%S).json"
 
 mkdir -p "$BACKUP_DIR"
 
-echo "[1/6] Exporting current WF02 from n8n..."
+echo "[1/7] Exporting current WF02 from n8n..."
 docker compose exec -T n8n-main \
   n8n export:workflow \
   --id="$WORKFLOW_ID" \
@@ -29,7 +29,7 @@ docker compose cp \
 cp "$EXPORT_ON_HOST" "$BACKUP_PATH"
 echo "Backup: $BACKUP_PATH"
 
-echo "[2/6] Patching the exported workflow..."
+echo "[2/7] Repairing the exported workflow..."
 python3 - "$EXPORT_ON_HOST" "$PATCHED_ON_HOST" <<'PY'
 from __future__ import annotations
 
@@ -53,15 +53,7 @@ TERMINAL_RESULT_NODES = [
     "Return Terminal Delivery Result",
 ]
 
-RETURN_CODE = """const items = $input.all();
-
-if (items.length !== 1) {
-  throw new Error(
-    `WF02 return boundary expected exactly one item, received ${items.length}`,
-  );
-}
-
-const input = items[0].json ?? {};
+RETURN_CODE = """const input = $json ?? {};
 
 if (input.workflow !== 'WF02') {
   throw new Error(
@@ -113,36 +105,32 @@ missing = [name for name in TERMINAL_RESULT_NODES if name not in node_by_name]
 if missing:
     raise SystemExit("Missing terminal nodes: " + ", ".join(missing))
 
-if RETURN_NODE_NAME not in node_by_name:
+return_node = node_by_name.get(RETURN_NODE_NAME)
+
+if return_node is None:
     positions = [
         node_by_name[name].get("position", [0, 0])
         for name in TERMINAL_RESULT_NODES
     ]
-
     return_x = max(position[0] for position in positions) + 400
     return_y = round(
         sum(position[1] for position in positions) / len(positions)
     )
 
-    nodes.append(
-        {
-            "parameters": {
-                "mode": "runOnceForEachItem",
-                "jsCode": RETURN_CODE,
-            },
-            "type": "n8n-nodes-base.code",
-            "typeVersion": 2,
-            "position": [return_x, return_y],
-            "id": RETURN_NODE_ID,
-            "name": RETURN_NODE_NAME,
-        }
-    )
-else:
-    return_node = node_by_name[RETURN_NODE_NAME]
-    return_node["parameters"] = {
-        "mode": "runOnceForEachItem",
-        "jsCode": RETURN_CODE,
+    return_node = {
+        "parameters": {},
+        "type": "n8n-nodes-base.code",
+        "typeVersion": 2,
+        "position": [return_x, return_y],
+        "id": RETURN_NODE_ID,
+        "name": RETURN_NODE_NAME,
     }
+    nodes.append(return_node)
+
+return_node["parameters"] = {
+    "mode": "runOnceForEachItem",
+    "jsCode": RETURN_CODE,
+}
 
 for node_name in TERMINAL_RESULT_NODES:
     connections[node_name] = {
@@ -164,23 +152,28 @@ target.write_text(
 )
 
 print(f"workflow_id={workflow.get('id')}")
-print(f"active={workflow.get('active')}")
+print(f"active_before_import={workflow.get('active')}")
 print(f"nodes={len(nodes)}")
 print(f"return_node={RETURN_NODE_NAME}")
 print(f"connected_terminal_nodes={len(TERMINAL_RESULT_NODES)}")
 PY
 
-echo "[3/6] Copying the patched workflow into n8n..."
+echo "[3/7] Copying the repaired workflow into n8n..."
 docker compose cp \
   "$PATCHED_ON_HOST" \
   "n8n-main:$PATCHED_IN_CONTAINER"
 
-echo "[4/6] Updating the existing workflow through the n8n CLI..."
+echo "[4/7] Importing the repaired workflow..."
 docker compose exec -T n8n-main \
   n8n import:workflow \
   --input="$PATCHED_IN_CONTAINER"
 
-echo "[5/6] Restarting n8n processes to clear runtime caches..."
+echo "[5/7] Publishing WF02..."
+docker compose exec -T n8n-main \
+  n8n publish:workflow \
+  --id="$WORKFLOW_ID"
+
+echo "[6/7] Restarting n8n processes..."
 docker compose restart \
   n8n-main \
   n8n-worker-1 \
@@ -202,7 +195,7 @@ for attempt in $(seq 1 30); do
   sleep 2
 done
 
-echo "[6/6] Verifying the deployed workflow..."
+echo "[7/7] Verifying the deployed workflow..."
 docker compose exec -T n8n-main \
   n8n export:workflow \
   --id="$WORKFLOW_ID" \
@@ -234,6 +227,19 @@ if len(return_nodes) != 1:
         f"FAIL: expected one Return WF02 Result node, found {len(return_nodes)}"
     )
 
+return_node = return_nodes[0]
+parameters = return_node.get("parameters", {})
+js_code = parameters.get("jsCode", "")
+
+if parameters.get("mode") != "runOnceForEachItem":
+    raise SystemExit("FAIL: Return WF02 Result has the wrong execution mode")
+
+if "$input.all()" in js_code:
+    raise SystemExit("FAIL: Return WF02 Result still uses $input.all()")
+
+if "const input = $json ?? {};" not in js_code:
+    raise SystemExit("FAIL: Return WF02 Result does not use the per-item input")
+
 expected_sources = {
     "Build Not Required Result",
     "Build Already Delivered Result",
@@ -250,7 +256,10 @@ for source in expected_sources:
     if not any(item.get("node") == "Return WF02 Result" for item in flattened):
         raise SystemExit(f"FAIL: missing return connection from {source}")
 
-print("PASS: WF02 return boundary deployed")
+if workflow.get("active") is not True:
+    raise SystemExit("FAIL: WF02 is not active after deployment")
+
+print("PASS: WF02 return boundary repaired and published")
 print(f"workflow_id={workflow.get('id')}")
 print(f"active={workflow.get('active')}")
 print(f"nodes={len(nodes)}")
