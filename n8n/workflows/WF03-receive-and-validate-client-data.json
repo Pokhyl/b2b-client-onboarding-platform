@@ -1,5 +1,11 @@
 {
+  "updatedAt": "2026-07-25T14:18:53.823Z",
+  "createdAt": "2026-07-19T17:56:53.004Z",
+  "id": "CVHTFKM97aBHhmXf",
   "name": "WF03 - Receive and Validate Client Data",
+  "description": null,
+  "active": true,
+  "isArchived": false,
   "nodes": [
     {
       "parameters": {
@@ -8,7 +14,7 @@
       "type": "n8n-nodes-base.executeWorkflowTrigger",
       "typeVersion": 1.2,
       "position": [
-        -1136,
+        -864,
         -848
       ],
       "id": "8ce7c0d5-972f-4090-a9cf-48acad26a153",
@@ -28,8 +34,8 @@
       "type": "n8n-nodes-base.webhook",
       "typeVersion": 2.1,
       "position": [
-        -1232,
-        -1216
+        -912,
+        -1056
       ],
       "id": "60223750-127a-4fbd-9da7-1df21764c590",
       "name": "Webhook",
@@ -804,7 +810,7 @@
     {
       "parameters": {
         "mode": "runOnceForEachItem",
-        "jsCode": "const input = $json ?? {};\n\nconst UUID_PATTERN =\n  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;\n\nfunction isUuid(value) {\n  return (\n    typeof value === 'string' &&\n    UUID_PATTERN.test(value.trim())\n  );\n}\n\nfunction normalizeInvocationMode(value) {\n  if (\n    value === 'form_submission' ||\n    value === 'recovery'\n  ) {\n    return value;\n  }\n\n  return null;\n}\n\nconst invocationMode =\n  normalizeInvocationMode(\n    input.invocation_mode,\n  );\n\nfunction invalidResult(errorCode) {\n  return {\n    json: {\n      source_workflow:\n        'WF03',\n\n      invocation_mode:\n        invocationMode,\n\n      continuation_kind:\n        'correction_dispatch',\n\n      correction_decision:\n        'invalid_result',\n\n      error_code:\n        errorCode,\n\n      case_id:\n        isUuid(input.case_id)\n          ? input.case_id\n          : null,\n\n      correlation_id:\n        isUuid(input.correlation_id)\n          ? input.correlation_id\n          : null,\n\n      submission_id:\n        isUuid(\n          input.failed_submission_id,\n        )\n          ? input.failed_submission_id\n          : null,\n\n      wf02_result:\n        typeof input.result === 'string'\n          ? input.result\n          : null,\n\n      client_response_key:\n        'technical_failure',\n    },\n  };\n}\n\nif (invocationMode === null) {\n  return invalidResult(\n    'correction_invocation_mode_invalid',\n  );\n}\n\nconst caseId =\n  isUuid(input.case_id)\n    ? input.case_id\n        .trim()\n        .toLowerCase()\n    : null;\n\nconst correlationId =\n  isUuid(input.correlation_id)\n    ? input.correlation_id\n        .trim()\n        .toLowerCase()\n    : null;\n\nconst submissionId =\n  isUuid(input.failed_submission_id)\n    ? input.failed_submission_id\n        .trim()\n        .toLowerCase()\n    : null;\n\nconst result =\n  typeof input.result === 'string'\n    ? input.result.trim()\n    : '';\n\nif (\n  caseId === null ||\n  correlationId === null ||\n  submissionId === null\n) {\n  return invalidResult(\n    'correction_identity_missing',\n  );\n}\n\nconst expectedCycle =\n  `validation_failed:${submissionId}`;\n\nif (\n  input.request_cycle_key !==\n  expectedCycle\n) {\n  return invalidResult(\n    'correction_cycle_mismatch',\n  );\n}\n\nif (\n  result === 'delivered' ||\n  result === 'already_delivered'\n) {\n  if (\n    input.operation_status !==\n      'succeeded' ||\n    input.case_state !==\n      'awaiting_client_data'\n  ) {\n    return invalidResult(\n      'delivered_state_invalid',\n    );\n  }\n\n  return {\n    json: {\n      workflow:\n        'WF03',\n\n      invocation_mode:\n        invocationMode,\n\n      continuation_kind:\n        'correction_dispatch',\n\n      correction_decision:\n        'correction_ready',\n\n      case_id:\n        caseId,\n\n      correlation_id:\n        correlationId,\n\n      submission_id:\n        submissionId,\n\n      request_cycle_key:\n        expectedCycle,\n\n      wf02_result:\n        result,\n\n      external_operation_id:\n        isUuid(\n          input.external_operation_id,\n        )\n          ? input.external_operation_id\n          : null,\n    },\n  };\n}\n\nif (\n  result === 'failed_retryable' ||\n  result === 'busy' ||\n  result === 'not_due'\n) {\n  return {\n    json: {\n      workflow:\n        'WF03',\n\n      invocation_mode:\n        invocationMode,\n\n      continuation_kind:\n        'correction_dispatch',\n\n      correction_decision:\n        'correction_scheduled',\n\n      case_id:\n        caseId,\n\n      correlation_id:\n        correlationId,\n\n      submission_id:\n        submissionId,\n\n      request_cycle_key:\n        expectedCycle,\n\n      wf02_result:\n        result,\n\n      external_operation_id:\n        isUuid(\n          input.external_operation_id,\n        )\n          ? input.external_operation_id\n          : null,\n\n      next_retry_at:\n        typeof input.next_retry_at ===\n          'string'\n          ? input.next_retry_at\n          : null,\n    },\n  };\n}\n\nif (result === 'failed_terminal') {\n  return {\n    json: {\n      source_workflow:\n        'WF03',\n\n      invocation_mode:\n        invocationMode,\n\n      continuation_kind:\n        'correction_dispatch',\n\n      correction_decision:\n        'terminal_failure',\n\n      error_code:\n        'wf02_correction_terminal_failure',\n\n      case_id:\n        caseId,\n\n      correlation_id:\n        correlationId,\n\n      submission_id:\n        submissionId,\n\n      wf02_result:\n        result,\n\n      external_operation_id:\n        isUuid(\n          input.external_operation_id,\n        )\n          ? input.external_operation_id\n          : null,\n\n      client_response_key:\n        'technical_failure',\n    },\n  };\n}\n\nreturn invalidResult(\n  result === 'not_required'\n    ? 'wf02_correction_not_required'\n    : 'unsupported_wf02_result',\n);"
+        "jsCode": "const row = $json ?? {};\n\nconst UUID_PATTERN =\n  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;\n\nfunction isUuid(value) {\n  return (\n    typeof value === 'string' &&\n    UUID_PATTERN.test(value.trim())\n  );\n}\n\nfunction isPlainObject(value) {\n  return (\n    value !== null &&\n    typeof value === 'object' &&\n    !Array.isArray(value)\n  );\n}\n\nfunction normalizeInvocationMode(value) {\n  if (\n    value === 'form_submission' ||\n    value === 'recovery'\n  ) {\n    return value;\n  }\n\n  return null;\n}\n\nconst context =\n  isPlainObject(row.input_context)\n    ? row.input_context\n    : {};\n\nconst invocationMode =\n  normalizeInvocationMode(\n    context.invocation_mode,\n  );\n\nfunction invalidResult(errorCode) {\n  return {\n    json: {\n      source_workflow:\n        'WF03',\n\n      invocation_mode:\n        invocationMode,\n\n      continuation_kind:\n        'correction_dispatch',\n\n      correction_decision:\n        'invalid_result',\n\n      error_code:\n        errorCode,\n\n      case_id:\n        isUuid(context.case_id)\n          ? context.case_id\n          : null,\n\n      correlation_id:\n        isUuid(context.correlation_id)\n          ? context.correlation_id\n          : null,\n\n      submission_id:\n        isUuid(\n          context.failed_submission_id,\n        )\n          ? context.failed_submission_id\n          : null,\n\n      wf02_result:\n        typeof context.result === 'string'\n          ? context.result\n          : null,\n\n      external_operation_id:\n        isUuid(row.external_operation_id)\n          ? row.external_operation_id\n          : null,\n\n      client_response_key:\n        'technical_failure',\n    },\n  };\n}\n\nif (invocationMode === null) {\n  return invalidResult(\n    'correction_invocation_mode_invalid',\n  );\n}\n\nconst caseId =\n  isUuid(context.case_id)\n    ? context.case_id\n        .trim()\n        .toLowerCase()\n    : null;\n\nconst correlationId =\n  isUuid(context.correlation_id)\n    ? context.correlation_id\n        .trim()\n        .toLowerCase()\n    : null;\n\nconst submissionId =\n  isUuid(context.failed_submission_id)\n    ? context.failed_submission_id\n        .trim()\n        .toLowerCase()\n    : null;\n\nif (\n  caseId === null ||\n  correlationId === null ||\n  submissionId === null\n) {\n  return invalidResult(\n    'correction_identity_missing',\n  );\n}\n\nconst expectedCycle =\n  `validation_failed:${submissionId}`;\n\nif (\n  context.request_cycle_key !==\n  expectedCycle\n) {\n  return invalidResult(\n    'correction_cycle_mismatch',\n  );\n}\n\nif (\n  !isUuid(row.case_id) ||\n  row.case_id.toLowerCase() !== caseId ||\n  !isUuid(row.correlation_id) ||\n  row.correlation_id.toLowerCase() !==\n    correlationId ||\n  row.request_cycle_key !== expectedCycle\n) {\n  return invalidResult(\n    'authoritative_correction_identity_mismatch',\n  );\n}\n\nconst operationStatus =\n  typeof row.operation_status === 'string'\n    ? row.operation_status.trim()\n    : '';\n\nconst tokenStatus =\n  typeof row.token_status === 'string'\n    ? row.token_status.trim()\n    : '';\n\nconst caseState =\n  typeof row.case_state === 'string'\n    ? row.case_state.trim()\n    : '';\n\nconst childResult =\n  typeof context.result === 'string'\n    ? context.result.trim()\n    : '';\n\nif (\n  operationStatus === 'succeeded' &&\n  tokenStatus === 'delivered' &&\n  caseState === 'awaiting_client_data'\n) {\n  const result =\n    childResult === 'already_delivered'\n      ? 'already_delivered'\n      : 'delivered';\n\n  return {\n    json: {\n      workflow:\n        'WF03',\n\n      invocation_mode:\n        invocationMode,\n\n      continuation_kind:\n        'correction_dispatch',\n\n      correction_decision:\n        'correction_ready',\n\n      case_id:\n        caseId,\n\n      correlation_id:\n        correlationId,\n\n      submission_id:\n        submissionId,\n\n      request_cycle_key:\n        expectedCycle,\n\n      wf02_result:\n        result,\n\n      external_operation_id:\n        isUuid(row.external_operation_id)\n          ? row.external_operation_id\n          : null,\n    },\n  };\n}\n\nif (\n  operationStatus === 'failed_retryable' ||\n  operationStatus === 'leased' ||\n  operationStatus === 'pending'\n) {\n  const result =\n    operationStatus === 'failed_retryable'\n      ? 'failed_retryable'\n      : 'busy';\n\n  return {\n    json: {\n      workflow:\n        'WF03',\n\n      invocation_mode:\n        invocationMode,\n\n      continuation_kind:\n        'correction_dispatch',\n\n      correction_decision:\n        'correction_scheduled',\n\n      case_id:\n        caseId,\n\n      correlation_id:\n        correlationId,\n\n      submission_id:\n        submissionId,\n\n      request_cycle_key:\n        expectedCycle,\n\n      wf02_result:\n        result,\n\n      external_operation_id:\n        isUuid(row.external_operation_id)\n          ? row.external_operation_id\n          : null,\n\n      next_retry_at:\n        typeof row.next_retry_at === 'string'\n          ? row.next_retry_at\n          : null,\n    },\n  };\n}\n\nif (operationStatus === 'failed_terminal') {\n  return {\n    json: {\n      source_workflow:\n        'WF03',\n\n      invocation_mode:\n        invocationMode,\n\n      continuation_kind:\n        'correction_dispatch',\n\n      correction_decision:\n        'terminal_failure',\n\n      error_code:\n        'wf02_correction_terminal_failure',\n\n      case_id:\n        caseId,\n\n      correlation_id:\n        correlationId,\n\n      submission_id:\n        submissionId,\n\n      wf02_result:\n        'failed_terminal',\n\n      external_operation_id:\n        isUuid(row.external_operation_id)\n          ? row.external_operation_id\n          : null,\n\n      client_response_key:\n        'technical_failure',\n    },\n  };\n}\n\nreturn invalidResult(\n  'authoritative_wf02_correction_outcome_invalid',\n);\n"
       },
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
@@ -1357,9 +1363,32 @@
       ],
       "id": "75f70058-3cc2-433c-8b1c-04662edc14bb",
       "name": "Route Technical Failure Completion Mode"
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT\n    $3::jsonb AS input_context,\n\n    onboarding_case.id AS case_id,\n    onboarding_case.correlation_id,\n    onboarding_case.state AS case_state,\n\n    correction_token.id AS token_id,\n    correction_token.request_cycle_key,\n    correction_token.status AS token_status,\n    correction_token.expires_at AS token_expires_at,\n\n    correction_operation.id AS external_operation_id,\n    correction_operation.status AS operation_status,\n    correction_operation.attempt_count,\n    correction_operation.max_attempts,\n    correction_operation.next_retry_at,\n    correction_operation.external_id,\n    correction_operation.last_error_class,\n    correction_operation.last_error_summary\n\nFROM onboarding_cases AS onboarding_case\n\nLEFT JOIN LATERAL (\n    SELECT token.*\n    FROM onboarding_form_tokens AS token\n    WHERE token.case_id = onboarding_case.id\n      AND token.request_cycle_key = $2::text\n    ORDER BY token.issued_at DESC\n    LIMIT 1\n) AS correction_token ON true\n\nLEFT JOIN LATERAL (\n    SELECT operation.*\n    FROM external_operations AS operation\n    WHERE operation.case_id = onboarding_case.id\n      AND operation.operation_type = 'send_client_data_request'\n      AND operation.request_summary ->> 'request_cycle_key' = $2::text\n    ORDER BY operation.created_at DESC\n    LIMIT 1\n) AS correction_operation ON true\n\nWHERE onboarding_case.id = $1::uuid;\n",
+        "options": {
+          "queryReplacement": "={{\n[\n  $json.case_id,\n  $json.request_cycle_key,\n  JSON.stringify($json)\n]\n}}"
+        }
+      },
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        2376,
+        -656
+      ],
+      "id": "f0b37dd6-f2e9-44f0-b91c-a978cf1e8d33",
+      "name": "Load Authoritative WF02 Correction Outcome",
+      "alwaysOutputData": true,
+      "credentials": {
+        "postgres": {
+          "id": "zU4wPvkQFRBSwH0b",
+          "name": "B2B Onboarding App DB"
+        }
+      }
     }
   ],
-  "pinData": {},
   "connections": {
     "Client Data Form": {
       "main": [
@@ -1661,7 +1690,7 @@
       "main": [
         [
           {
-            "node": "Normalize WF02 Correction Result",
+            "node": "Load Authoritative WF02 Correction Outcome",
             "type": "main",
             "index": 0
           }
@@ -1967,9 +1996,19 @@
           }
         ]
       ]
+    },
+    "Load Authoritative WF02 Correction Outcome": {
+      "main": [
+        [
+          {
+            "node": "Normalize WF02 Correction Result",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
     }
   },
-  "active": true,
   "settings": {
     "executionOrder": "v1",
     "binaryMode": "separate",
@@ -1978,12 +2017,40 @@
     "errorWorkflow": "WykBM7mvCOqph91a",
     "callerPolicy": "workflowsFromSameOwner"
   },
-  "versionId": "af686d32-425c-4289-af0a-36d439044ef5",
+  "staticData": null,
   "meta": {
-    "templateCredsSetupCompleted": true,
-    "instanceId": "72249f432a77256c34affd74b688f3209ef91628f0f09e01d73ae5bb45f3c5f3"
+    "templateCredsSetupCompleted": true
   },
   "nodeGroups": [],
-  "id": "CVHTFKM97aBHhmXf",
-  "tags": []
+  "pinData": {},
+  "versionId": "38b3792f-5c8a-46b8-8b42-5480f867442f",
+  "activeVersionId": "af686d32-425c-4289-af0a-36d439044ef5",
+  "versionCounter": 443,
+  "triggerCount": 2,
+  "sourceWorkflowId": null,
+  "tags": [],
+  "shared": [
+    {
+      "updatedAt": "2026-07-19T17:56:53.004Z",
+      "createdAt": "2026-07-19T17:56:53.004Z",
+      "role": "workflow:owner",
+      "workflowId": "CVHTFKM97aBHhmXf",
+      "projectId": "zmxxmv9P8lYEvh92",
+      "project": {
+        "updatedAt": "2026-07-18T09:30:21.224Z",
+        "createdAt": "2026-07-18T09:24:05.682Z",
+        "id": "zmxxmv9P8lYEvh92",
+        "name": "Vitalii Pokhyl <pokhylvitalii@gmail.com>",
+        "type": "personal",
+        "icon": null,
+        "description": null,
+        "customTelemetryTags": [],
+        "creatorId": "9bff2e70-7eea-4940-a9da-d5dfd1c2d055"
+      }
+    }
+  ],
+  "versionMetadata": {
+    "name": null,
+    "description": null
+  }
 }

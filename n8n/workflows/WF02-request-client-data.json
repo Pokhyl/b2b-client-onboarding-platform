@@ -3180,6 +3180,20 @@
       ],
       "id": "9ca534c9-aa49-421c-a362-8e60f719b5b7",
       "name": "Return Terminal Delivery Result"
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "const items = $input.all();\n\nif (items.length !== 1) {\n  throw new Error(\n    `WF02 return boundary expected exactly one item, received ${items.length}`,\n  );\n}\n\nconst input = items[0].json ?? {};\n\nif (input.workflow !== 'WF02') {\n  throw new Error(\n    'WF02 return boundary requires workflow equal to WF02',\n  );\n}\n\nif (\n  typeof input.result !== 'string' ||\n  input.result.trim() === ''\n) {\n  throw new Error(\n    'WF02 return boundary requires a non-empty result',\n  );\n}\n\nreturn {\n  json: {\n    ...input,\n    result: input.result.trim(),\n  },\n};\n"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2640,
+        1323
+      ],
+      "id": "24e6f463-936c-4f0a-a6fe-8c3fddc4df70",
+      "name": "Return WF02 Result"
     }
   ],
   "connections": {
@@ -4682,6 +4696,83 @@
         [
           {
             "node": "Return Terminal Delivery Result",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Not Required Result": {
+      "main": [
+        [
+          {
+            "node": "Return WF02 Result",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Already Delivered Result": {
+      "main": [
+        [
+          {
+            "node": "Return WF02 Result",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Non-Send Claim Result": {
+      "main": [
+        [
+          {
+            "node": "Return WF02 Result",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Lease Lost Result": {
+      "main": [
+        [
+          {
+            "node": "Return WF02 Result",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Existing Terminal Operation Result": {
+      "main": [
+        [
+          {
+            "node": "Return WF02 Result",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Retryable Delivery Result": {
+      "main": [
+        [
+          {
+            "node": "Return WF02 Result",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Return Terminal Delivery Result": {
+      "main": [
+        [
+          {
+            "node": "Return WF02 Result",
             "type": "main",
             "index": 0
           }
