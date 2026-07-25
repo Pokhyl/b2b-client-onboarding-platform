@@ -32,7 +32,7 @@ SELECT
     COALESCE(submission.validation_status, ''),
     COALESCE(correction_token.status, ''),
     COALESCE(correction_operation.status, ''),
-    COALESCE(latest_error.error_code, ''),
+    COALESCE(latest_submission_error.error_code, ''),
     COALESCE(correction_operation.external_id, '')
 FROM onboarding_cases AS oc
 LEFT JOIN onboarding_steps AS collect_step
@@ -73,9 +73,11 @@ LEFT JOIN LATERAL (
     SELECT el.*
     FROM error_log AS el
     WHERE el.case_id = oc.id
+      AND submission.id IS NOT NULL
+      AND el.submission_id = submission.id
     ORDER BY el.occurred_at DESC
     LIMIT 1
-) AS latest_error ON true
+) AS latest_submission_error ON true
 WHERE oc.id = '$CASE_ID'::uuid;
 SQL
 } | tail -n 1)"
@@ -104,7 +106,7 @@ printf '%-28s %s\n' "submission_validation" "$SUBMISSION_STATUS"
 printf '%-28s %s\n' "correction_token_status" "$TOKEN_STATUS"
 printf '%-28s %s\n' "correction_operation_status" "$OPERATION_STATUS"
 printf '%-28s %s\n' "correction_message_id" "$EXTERNAL_ID"
-printf '%-28s %s\n' "latest_error_code" "$LATEST_ERROR_CODE"
+printf '%-28s %s\n' "latest_submission_error" "$LATEST_ERROR_CODE"
 
 if [[ "$LATEST_ERROR_CODE" == "unsupported_wf02_result" ]]; then
   echo "FAIL: WF03 did not receive the WF02 return contract" >&2
@@ -117,9 +119,10 @@ if [[
   "$VALIDATE_STATUS" == "pending" &&
   "$SUBMISSION_STATUS" == "failed" &&
   "$TOKEN_STATUS" == "delivered" &&
-  "$OPERATION_STATUS" == "succeeded"
+  "$OPERATION_STATUS" == "succeeded" &&
+  -z "$LATEST_ERROR_CODE"
 ]]; then
-  echo "PASS: WF02 -> WF03 correction cycle is consistent"
+  echo "PASS: WF02 -> WF03 correction return contract is working"
   exit 0
 fi
 
