@@ -1,0 +1,1989 @@
+{
+  "name": "WF03 - Receive and Validate Client Data",
+  "nodes": [
+    {
+      "parameters": {
+        "inputSource": "passthrough"
+      },
+      "type": "n8n-nodes-base.executeWorkflowTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        -1136,
+        -848
+      ],
+      "id": "8ce7c0d5-972f-4090-a9cf-48acad26a153",
+      "name": "Internal Invocation Trigger"
+    },
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "internal/wf03-retry-dispatch",
+        "authentication": "headerAuth",
+        "options": {
+          "responseCode": {
+            "values": {}
+          }
+        }
+      },
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2.1,
+      "position": [
+        -1232,
+        -1216
+      ],
+      "id": "60223750-127a-4fbd-9da7-1df21764c590",
+      "name": "Webhook",
+      "webhookId": "cc3934f6-1d8a-407d-ad8b-3c9b20fa04a7",
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "vRGUhlaMi4SARvdN",
+          "name": "Header Auth account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "formTitle": "Client onboarding data",
+        "formDescription": "Complete the information required to continue your onboarding.",
+        "formFields": {
+          "values": [
+            {
+              "fieldLabel": "Company identifier country",
+              "fieldName": "company_identifier_country",
+              "placeholder": "PL"
+            },
+            {
+              "fieldLabel": "Company identifier type",
+              "fieldName": "company_identifier_type",
+              "placeholder": "nip"
+            },
+            {
+              "fieldLabel": "Company identifier value",
+              "fieldName": "company_identifier_value",
+              "placeholder": "123-456-78-90"
+            },
+            {
+              "fieldLabel": "Legal company name",
+              "fieldName": "legal_name",
+              "placeholder": "Example Industries Sp. z o.o."
+            },
+            {
+              "fieldLabel": "Primary contact first name",
+              "fieldName": "primary_contact_first_name",
+              "placeholder": "Anna"
+            },
+            {
+              "fieldLabel": "Primary contact last name",
+              "fieldName": "primary_contact_last_name",
+              "placeholder": "Kowalska"
+            },
+            {
+              "fieldLabel": "Primary contact email",
+              "fieldName": "primary_contact_email",
+              "placeholder": "anna.kowalska@example.com"
+            },
+            {
+              "fieldLabel": "Primary contact phone",
+              "fieldName": "primary_contact_phone",
+              "placeholder": "+48500100200"
+            }
+          ]
+        },
+        "responseMode": "lastNode",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.formTrigger",
+      "typeVersion": 2.6,
+      "position": [
+        -1248,
+        -416
+      ],
+      "id": "4181fa22-e71d-4a7e-b5b3-d90131de571f",
+      "name": "Client Data Form",
+      "webhookId": "3e952513-b9ce-4f9c-8e42-6b628b52522e"
+    },
+    {
+      "parameters": {
+        "jsCode": "const crypto = require('crypto');\n\nconst items = $input.all();\n\nif (items.length !== 1) {\n  throw new Error(\n    `WF03 expected exactly one form submission, received ${items.length}`,\n  );\n}\n\nconst item = items[0];\nconst input = item.json ?? {};\nconst binary = item.binary ?? {};\n\nconst BUSINESS_FIELDS = [\n  'company_identifier_country',\n  'company_identifier_type',\n  'company_identifier_value',\n  'legal_name',\n  'primary_contact_first_name',\n  'primary_contact_last_name',\n  'primary_contact_email',\n  'primary_contact_phone',\n];\n\nconst FIELD_LIMITS = {\n  company_identifier_country: 8,\n  company_identifier_type: 64,\n  company_identifier_value: 128,\n  legal_name: 256,\n  primary_contact_first_name: 128,\n  primary_contact_last_name: 128,\n  primary_contact_email: 320,\n  primary_contact_phone: 64,\n};\n\nconst ALLOWED_TOP_LEVEL_FIELDS = new Set([\n  ...BUSINESS_FIELDS,\n  'submittedAt',\n  'formMode',\n  'formQueryParameters',\n]);\n\nfunction isPlainObject(value) {\n  return (\n    value !== null &&\n    typeof value === 'object' &&\n    !Array.isArray(value)\n  );\n}\n\nfunction rejectSubmission(\n  decision,\n  errorCode,\n) {\n  return [\n    {\n      json: {\n        workflow: 'WF03',\n\n        intake_decision: decision,\n        intake_valid: false,\n\n        error_code: errorCode,\n\n        // The public response will be identical for malformed\n        // forms and invalid tokens.\n        client_response_key:\n          'invalid_or_expired_submission_link',\n      },\n    },\n  ];\n}\n\nfunction normalizeCommonString(value) {\n  if (value === null) {\n    return null;\n  }\n\n  const normalized = value\n    .normalize('NFKC')\n    .replace(/\\p{White_Space}+/gu, ' ')\n    .trim();\n\n  return normalized === ''\n    ? null\n    : normalized;\n}\n\nfunction normalizeCountry(value) {\n  const normalized =\n    normalizeCommonString(value);\n\n  return normalized === null\n    ? null\n    : normalized.toUpperCase();\n}\n\nfunction normalizeIdentifierType(value) {\n  const normalized =\n    normalizeCommonString(value);\n\n  return normalized === null\n    ? null\n    : normalized.toLowerCase();\n}\n\nfunction normalizeIdentifierValue(value) {\n  const visibleValue =\n    normalizeCommonString(value);\n\n  if (visibleValue === null) {\n    return {\n      visible: null,\n      normalized: null,\n    };\n  }\n\n  const normalizedValue = visibleValue\n    .normalize('NFKC')\n    .toUpperCase()\n    .replace(/\\p{White_Space}+/gu, '')\n    .replace(/[-./]/g, '');\n\n  return {\n    visible: visibleValue,\n    normalized:\n      normalizedValue === ''\n        ? null\n        : normalizedValue,\n  };\n}\n\nfunction normalizeEmail(value) {\n  const normalized =\n    normalizeCommonString(value);\n\n  return normalized === null\n    ? null\n    : normalized.toLowerCase();\n}\n\nfunction normalizePhone(value) {\n  const normalized =\n    normalizeCommonString(value);\n\n  if (normalized === null) {\n    return null;\n  }\n\n  return normalized\n    .replace(/\\p{White_Space}+/gu, '')\n    .replace(/[()\\-]/g, '');\n}\n\n// A form submission must be one flat JSON object.\nif (!isPlainObject(input)) {\n  return rejectSubmission(\n    'invalid_form',\n    'form_payload_not_object',\n  );\n}\n\n// Uploaded files are not accepted in this form.\nif (Object.keys(binary).length > 0) {\n  return rejectSubmission(\n    'invalid_form',\n    'file_upload_not_allowed',\n  );\n}\n\n// Reject unexpected fields before token hashing\n// or any database operation.\nconst unknownFields = Object.keys(input)\n  .filter(\n    (fieldName) =>\n      !ALLOWED_TOP_LEVEL_FIELDS.has(fieldName),\n  );\n\nif (unknownFields.length > 0) {\n  return rejectSubmission(\n    'invalid_form',\n    'unknown_form_fields',\n  );\n}\n\nconst submittedData = {};\n\nfor (const fieldName of BUSINESS_FIELDS) {\n  const value =\n    input[fieldName] === undefined\n      ? null\n      : input[fieldName];\n\n  if (\n    value !== null &&\n    typeof value !== 'string'\n  ) {\n    return rejectSubmission(\n      'invalid_form',\n      'business_field_not_string',\n    );\n  }\n\n  if (\n    typeof value === 'string' &&\n    Array.from(value).length >\n      FIELD_LIMITS[fieldName]\n  ) {\n    return rejectSubmission(\n      'invalid_form',\n      'business_field_too_long',\n    );\n  }\n\n  submittedData[fieldName] = value;\n}\n\n// This is a logical payload-size check.\n// The reverse proxy will later provide the hard HTTP limit.\nconst payloadSizeBytes = Buffer.byteLength(\n  JSON.stringify(submittedData),\n  'utf8',\n);\n\nif (payloadSizeBytes > 64 * 1024) {\n  return rejectSubmission(\n    'invalid_form',\n    'form_payload_too_large',\n  );\n}\n\nconst queryParameters =\n  input.formQueryParameters;\n\nif (!isPlainObject(queryParameters)) {\n  return rejectSubmission(\n    'unauthorized',\n    'token_missing',\n  );\n}\n\n// Only the opaque token is accepted in the public URL.\nconst unknownQueryParameters =\n  Object.keys(queryParameters)\n    .filter(\n      (parameterName) =>\n        parameterName !== 'token',\n    );\n\nif (unknownQueryParameters.length > 0) {\n  return rejectSubmission(\n    'invalid_form',\n    'unknown_query_parameters',\n  );\n}\n\nconst plainToken =\n  queryParameters.token;\n\nif (\n  typeof plainToken !== 'string' ||\n  plainToken.length === 0 ||\n  plainToken.length > 128 ||\n  !/^[A-Za-z0-9_-]+$/.test(plainToken)\n) {\n  return rejectSubmission(\n    'unauthorized',\n    'token_malformed',\n  );\n}\n\nlet tokenBytes;\n\ntry {\n  tokenBytes = Buffer.from(\n    plainToken,\n    'base64url',\n  );\n} catch {\n  return rejectSubmission(\n    'unauthorized',\n    'token_malformed',\n  );\n}\n\n// Canonical comparison prevents Buffer.from()\n// from silently accepting malformed Base64URL.\nconst canonicalToken =\n  tokenBytes.toString('base64url');\n\nif (\n  tokenBytes.length !== 32 ||\n  canonicalToken !== plainToken\n) {\n  return rejectSubmission(\n    'unauthorized',\n    'token_malformed',\n  );\n}\n\nconst tokenHashBase64 = crypto\n  .createHash('sha256')\n  .update(tokenBytes)\n  .digest('base64');\n\nconst identifier =\n  normalizeIdentifierValue(\n    submittedData\n      .company_identifier_value,\n  );\n\nconst normalizedData = {\n  company_identifier_country:\n    normalizeCountry(\n      submittedData\n        .company_identifier_country,\n    ),\n\n  company_identifier_type:\n    normalizeIdentifierType(\n      submittedData\n        .company_identifier_type,\n    ),\n\n  company_identifier_value:\n    identifier.visible,\n\n  company_identifier_value_normalized:\n    identifier.normalized,\n\n  legal_name:\n    normalizeCommonString(\n      submittedData.legal_name,\n    ),\n\n  primary_contact_first_name:\n    normalizeCommonString(\n      submittedData\n        .primary_contact_first_name,\n    ),\n\n  primary_contact_last_name:\n    normalizeCommonString(\n      submittedData\n        .primary_contact_last_name,\n    ),\n\n  primary_contact_email:\n    normalizeEmail(\n      submittedData\n        .primary_contact_email,\n    ),\n\n  primary_contact_phone:\n    normalizePhone(\n      submittedData\n        .primary_contact_phone,\n    ),\n};\n\n// Do not spread the original input here.\n// That would copy the plain token into the next node.\nreturn [\n  {\n    json: {\n      workflow: 'WF03',\n\n      intake_decision:\n        'ready_for_authorization',\n\n      intake_valid: true,\n\n      token_hash_base64:\n        tokenHashBase64,\n\n      submitted_data:\n        submittedData,\n\n      normalized_data:\n        normalizedData,\n\n      form_mode:\n        typeof input.formMode === 'string'\n          ? input.formMode\n          : null,\n\n      submitted_at:\n        typeof input.submittedAt === 'string'\n          ? input.submittedAt\n          : null,\n    },\n  },\n];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -1024,
+        -416
+      ],
+      "id": "19f6ecd7-1383-4e9c-8eb9-abf91f942ee6",
+      "name": "Validate Normalize and Hash Form Submission"
+    },
+    {
+      "parameters": {
+        "rules": {
+          "values": [
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 3
+                },
+                "conditions": [
+                  {
+                    "leftValue": "={{ $json.intake_decision }}",
+                    "rightValue": "ready_for_authorization",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    },
+                    "id": "90e44e98-31fc-4d2c-b642-7483b5b8f668"
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "ready_for_authorization"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 3
+                },
+                "conditions": [
+                  {
+                    "id": "a2aa8611-ee43-4f39-a828-7a1f70cd48f8",
+                    "leftValue": "={{ $json.intake_decision }}",
+                    "rightValue": "invalid_form",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals",
+                      "name": "filter.operator.equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "invalid_form"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 3
+                },
+                "conditions": [
+                  {
+                    "id": "464b42c8-9f7a-477e-baa0-ac800f493f08",
+                    "leftValue": "={{ $json.intake_decision }}",
+                    "rightValue": "unauthorized",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals",
+                      "name": "filter.operator.equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "unauthorized"
+            }
+          ]
+        },
+        "options": {
+          "fallbackOutput": "extra"
+        }
+      },
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 3.4,
+      "position": [
+        -816,
+        -416
+      ],
+      "id": "9c6b571d-5f8c-4db8-b6e8-846a9120ef7e",
+      "name": "Route Form Intake Decision"
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "WITH consumed AS (\n    SELECT *\n    FROM consume_form_token_and_create_submission(\n        decode($1::text, 'base64'),\n        $2::jsonb,\n        $3::jsonb\n    )\n)\nSELECT\n    $4::jsonb AS input_context,\n    consumed.consume_outcome,\n    consumed.created_submission_id,\n    consumed.onboarding_case_id,\n    consumed.created_submission_sequence\nFROM consumed;",
+        "options": {
+          "queryReplacement": "={{ [   $json.token_hash_base64,    JSON.stringify(     $json.submitted_data   ),    JSON.stringify(     $json.normalized_data   ),    JSON.stringify({     workflow: $json.workflow,     submitted_at:       $json.submitted_at ?? null,     form_mode:       $json.form_mode ?? null   }) ] }}"
+        }
+      },
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        -608,
+        -608
+      ],
+      "id": "05c92f1b-c0ea-4097-af40-ae03af81a700",
+      "name": "Consume Form Token and Create Submission",
+      "credentials": {
+        "postgres": {
+          "id": "zU4wPvkQFRBSwH0b",
+          "name": "B2B Onboarding App DB"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const items = $input.all();\n\nif (items.length !== 1) {\n  throw new Error(\n    `WF03 token consumption expected exactly one result, received ${items.length}`,\n  );\n}\n\nconst row = items[0].json ?? {};\n\nconst inputContext =\n  row.input_context &&\n  typeof row.input_context === 'object' &&\n  !Array.isArray(row.input_context)\n    ? row.input_context\n    : {};\n\nconst consumeOutcome =\n  typeof row.consume_outcome === 'string'\n    ? row.consume_outcome.trim()\n    : '';\n\nconst unauthorizedOutcomes = new Set([\n  'invalid_token',\n  'already_consumed',\n  'revoked',\n  'expired',\n  'not_delivered',\n  'invalid_case_state',\n]);\n\nif (consumeOutcome === 'created') {\n  const submissionId =\n    typeof row.created_submission_id === 'string'\n      ? row.created_submission_id.trim()\n      : '';\n\n  const caseId =\n    typeof row.onboarding_case_id === 'string'\n      ? row.onboarding_case_id.trim()\n      : '';\n\n  const submissionSequence =\n    Number(row.created_submission_sequence);\n\n  if (\n    submissionId === '' ||\n    caseId === '' ||\n    !Number.isInteger(submissionSequence) ||\n    submissionSequence < 1\n  ) {\n    return [\n      {\n        json: {\n          workflow: 'WF03',\n\n          authorization_decision:\n            'invalid_database_result',\n\n          consume_outcome:\n            consumeOutcome || null,\n\n          error_code:\n            'created_result_missing_identity',\n\n          client_response_key:\n            'technical_failure',\n        },\n      },\n    ];\n  }\n\n  return [\n    {\n      json: {\n        workflow: 'WF03',\n\n        authorization_decision:\n          'submission_created',\n\n        consume_outcome:\n          'created',\n\n        case_id:\n          caseId,\n\n        submission_id:\n          submissionId,\n\n        submission_sequence:\n          submissionSequence,\n\n        submitted_at:\n          inputContext.submitted_at ?? null,\n\n        form_mode:\n          inputContext.form_mode ?? null,\n      },\n    },\n  ];\n}\n\nif (unauthorizedOutcomes.has(consumeOutcome)) {\n  return [\n    {\n      json: {\n        workflow: 'WF03',\n\n        authorization_decision:\n          'unauthorized',\n\n        // Kept internally for routing and audit.\n        // It must not be shown to the client.\n        consume_outcome:\n          consumeOutcome,\n\n        case_id: null,\n        submission_id: null,\n        submission_sequence: null,\n\n        client_response_key:\n          'invalid_or_expired_submission_link',\n      },\n    },\n  ];\n}\n\nreturn [\n  {\n    json: {\n      workflow: 'WF03',\n\n      authorization_decision:\n        'invalid_database_result',\n\n      consume_outcome:\n        consumeOutcome || null,\n\n      error_code:\n        'unsupported_consume_outcome',\n\n      client_response_key:\n        'technical_failure',\n    },\n  },\n];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -400,
+        -608
+      ],
+      "id": "4d753067-cc76-4eb8-8946-423e72367a8a",
+      "name": "Normalize Token Consumption Outcome"
+    },
+    {
+      "parameters": {
+        "rules": {
+          "values": [
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 3
+                },
+                "conditions": [
+                  {
+                    "leftValue": "={{ $json.authorization_decision }}",
+                    "rightValue": "submission_created",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    },
+                    "id": "7c30110b-4a45-4fb2-8b46-8f856969f9e1"
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "submission_created"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 3
+                },
+                "conditions": [
+                  {
+                    "id": "722c7b1b-9e16-4871-8692-ac65ac65fa29",
+                    "leftValue": "={{ $json.authorization_decision }}",
+                    "rightValue": "unauthorized",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals",
+                      "name": "filter.operator.equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "unauthorized"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 3
+                },
+                "conditions": [
+                  {
+                    "id": "ac9868c0-3264-4bac-8b27-ed87224236d2",
+                    "leftValue": "={{ $json.authorization_decision }}",
+                    "rightValue": "invalid_database_result",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals",
+                      "name": "filter.operator.equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "invalid_database_result"
+            }
+          ]
+        },
+        "options": {
+          "fallbackOutput": "extra"
+        }
+      },
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 3.4,
+      "position": [
+        -240,
+        -560
+      ],
+      "id": "387499d7-98c4-4734-b40c-e3c62cbef7ac",
+      "name": "Route Token Consumption Outcome"
+    },
+    {
+      "parameters": {
+        "operation": "completion",
+        "completionTitle": "We could not process this submission",
+        "completionMessage": "Please request a new form link from your onboarding contact.",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.form",
+      "typeVersion": 2.5,
+      "position": [
+        176,
+        -384
+      ],
+      "id": "c75eaaac-4b24-4e38-b951-5c48e6eaf3d3",
+      "name": "Show Invalid Submission Result",
+      "webhookId": "d9deab91-040d-46c7-8962-0586ca2ffbc4"
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT\n    $3::jsonb AS input_context,\n\n    onboarding_case.id AS case_id,\n    onboarding_case.correlation_id,\n    onboarding_case.state AS case_state,\n    onboarding_case.client_id,\n    onboarding_case.accepted_submission_id,\n\n    submission.id AS submission_id,\n    submission.submission_sequence,\n    submission.validation_status,\n    submission.validation_errors,\n    submission.submitted_data,\n    submission.normalized_data,\n    submission.submitted_at,\n\n    form_token.id AS token_id,\n    form_token.status AS token_status,\n    form_token.consumed_at AS token_consumed_at,\n\n    collect_step.id AS collect_step_id,\n    collect_step.status AS collect_step_status,\n    collect_step.attempt_count AS collect_step_attempt_count,\n\n    validate_step.id AS validate_step_id,\n    validate_step.status AS validate_step_status,\n    validate_step.attempt_count AS validate_step_attempt_count\n\nFROM onboarding_cases AS onboarding_case\n\nJOIN onboarding_submissions AS submission\n  ON submission.case_id = onboarding_case.id\n AND submission.id = $2::uuid\n\nJOIN onboarding_form_tokens AS form_token\n  ON form_token.id = submission.form_token_id\n AND form_token.case_id = onboarding_case.id\n\nJOIN onboarding_steps AS collect_step\n  ON collect_step.case_id = onboarding_case.id\n AND collect_step.step_type = 'collect_client_data'\n\nJOIN onboarding_steps AS validate_step\n  ON validate_step.case_id = onboarding_case.id\n AND validate_step.step_type = 'validate_client_data'\n\nWHERE onboarding_case.id = $1::uuid\n  AND submission.id = $2::uuid\n  AND (\n    $4::integer IS NULL\n    OR submission.submission_sequence = $4::integer\n  );",
+        "options": {
+          "queryReplacement": "={{\n[\n  $json.case_id,\n  $json.submission_id,\n\n  JSON.stringify({\n    workflow: $json.workflow,\n    invocation_mode:\n      $json.invocation_mode ?? null,\n    consume_outcome:\n      $json.consume_outcome ?? null,\n    submitted_at:\n      $json.submitted_at ?? null,\n    form_mode:\n      $json.form_mode ?? null,\n    recovery_reason:\n      $json.recovery_reason ?? null\n  }),\n\n  $json.submission_sequence ?? null\n]\n}}"
+        }
+      },
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        112,
+        -768
+      ],
+      "id": "907a7037-9e56-4faf-8a85-43a5892383b8",
+      "name": "Load Authoritative Submission Context",
+      "alwaysOutputData": true,
+      "credentials": {
+        "postgres": {
+          "id": "zU4wPvkQFRBSwH0b",
+          "name": "B2B Onboarding App DB"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const items = $input.all();\n\nfunction buildTechnicalFailure(errorCode) {\n  return [\n    {\n      json: {\n        workflow: 'WF03',\n\n        validation_decision:\n          'invalid_authoritative_context',\n\n        error_code: errorCode,\n\n        client_response_key:\n          'technical_failure',\n      },\n    },\n  ];\n}\n\nif (items.length !== 1) {\n  return buildTechnicalFailure(\n    'authoritative_context_item_count_invalid',\n  );\n}\n\nconst row = items[0].json ?? {};\n\nfunction isPlainObject(value) {\n  return (\n    value !== null &&\n    typeof value === 'object' &&\n    !Array.isArray(value)\n  );\n}\n\nfunction isUuid(value) {\n  return (\n    typeof value === 'string' &&\n    /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i\n      .test(value)\n  );\n}\n\nfunction normalizeCommonString(value) {\n  if (value === null) {\n    return null;\n  }\n\n  if (typeof value !== 'string') {\n    return null;\n  }\n\n  const normalized = value\n    .normalize('NFKC')\n    .replace(/\\p{White_Space}+/gu, ' ')\n    .trim();\n\n  return normalized === ''\n    ? null\n    : normalized;\n}\n\nfunction normalizeCountry(value) {\n  const normalized =\n    normalizeCommonString(value);\n\n  return normalized === null\n    ? null\n    : normalized.toUpperCase();\n}\n\nfunction normalizeIdentifierType(value) {\n  const normalized =\n    normalizeCommonString(value);\n\n  return normalized === null\n    ? null\n    : normalized.toLowerCase();\n}\n\nfunction normalizeIdentifierValue(value) {\n  const visible =\n    normalizeCommonString(value);\n\n  if (visible === null) {\n    return {\n      visible: null,\n      normalized: null,\n    };\n  }\n\n  const normalized = visible\n    .normalize('NFKC')\n    .toUpperCase()\n    .replace(/\\p{White_Space}+/gu, '')\n    .replace(/[-./]/g, '');\n\n  return {\n    visible,\n    normalized:\n      normalized === ''\n        ? null\n        : normalized,\n  };\n}\n\nfunction normalizeEmail(value) {\n  const normalized =\n    normalizeCommonString(value);\n\n  return normalized === null\n    ? null\n    : normalized.toLowerCase();\n}\n\nfunction normalizePhone(value) {\n  const normalized =\n    normalizeCommonString(value);\n\n  if (normalized === null) {\n    return null;\n  }\n\n  return normalized\n    .replace(/\\p{White_Space}+/gu, '')\n    .replace(/[()\\-]/g, '');\n}\n\nconst contextErrors = [];\n\nif (!isUuid(row.case_id)) {\n  contextErrors.push('case_id_invalid');\n}\n\nif (!isUuid(row.correlation_id)) {\n  contextErrors.push(\n    'correlation_id_invalid',\n  );\n}\n\nif (!isUuid(row.submission_id)) {\n  contextErrors.push(\n    'submission_id_invalid',\n  );\n}\n\nif (!isUuid(row.token_id)) {\n  contextErrors.push('token_id_invalid');\n}\n\nif (!isUuid(row.collect_step_id)) {\n  contextErrors.push(\n    'collect_step_id_invalid',\n  );\n}\n\nif (!isUuid(row.validate_step_id)) {\n  contextErrors.push(\n    'validate_step_id_invalid',\n  );\n}\n\nconst submissionSequence =\n  Number(row.submission_sequence);\n\nif (\n  !Number.isInteger(submissionSequence) ||\n  submissionSequence < 1\n) {\n  contextErrors.push(\n    'submission_sequence_invalid',\n  );\n}\n\nif (row.case_state !== 'data_received') {\n  contextErrors.push(\n    'case_state_not_data_received',\n  );\n}\n\nif (row.client_id !== null) {\n  contextErrors.push(\n    'case_client_already_assigned',\n  );\n}\n\nif (row.accepted_submission_id !== null) {\n  contextErrors.push(\n    'case_submission_already_accepted',\n  );\n}\n\nif (\n  row.validation_status !== 'pending'\n) {\n  contextErrors.push(\n    'submission_not_pending',\n  );\n}\n\nif (\n  !Array.isArray(row.validation_errors) ||\n  row.validation_errors.length !== 0\n) {\n  contextErrors.push(\n    'submission_errors_not_empty',\n  );\n}\n\nif (row.token_status !== 'consumed') {\n  contextErrors.push(\n    'token_not_consumed',\n  );\n}\n\nif (\n  typeof row.token_consumed_at !== 'string' ||\n  row.token_consumed_at.trim() === ''\n) {\n  contextErrors.push(\n    'token_consumed_at_missing',\n  );\n}\n\nif (\n  row.collect_step_status !==\n  'in_progress'\n) {\n  contextErrors.push(\n    'collect_step_not_in_progress',\n  );\n}\n\nif (\n  row.validate_step_status !== 'pending'\n) {\n  contextErrors.push(\n    'validate_step_not_pending',\n  );\n}\n\nif (!isPlainObject(row.submitted_data)) {\n  contextErrors.push(\n    'submitted_data_not_object',\n  );\n}\n\nif (!isPlainObject(row.normalized_data)) {\n  contextErrors.push(\n    'normalized_data_not_object',\n  );\n}\n\nif (contextErrors.length > 0) {\n  return [\n    {\n      json: {\n        workflow: 'WF03',\n\n        validation_decision:\n          'invalid_authoritative_context',\n\n        error_code:\n          'authoritative_context_invalid',\n\n        error_codes:\n          contextErrors,\n\n        case_id:\n          isUuid(row.case_id)\n            ? row.case_id\n            : null,\n\n        submission_id:\n          isUuid(row.submission_id)\n            ? row.submission_id\n            : null,\n\n        correlation_id:\n          isUuid(row.correlation_id)\n            ? row.correlation_id\n            : null,\n\n        client_response_key:\n          'technical_failure',\n      },\n    },\n  ];\n}\n\nconst submittedData =\n  row.submitted_data;\n\nconst persistedNormalizedData =\n  row.normalized_data;\n\nconst identifier =\n  normalizeIdentifierValue(\n    submittedData\n      .company_identifier_value ?? null,\n  );\n\nconst recalculatedNormalizedData = {\n  company_identifier_country:\n    normalizeCountry(\n      submittedData\n        .company_identifier_country ?? null,\n    ),\n\n  company_identifier_type:\n    normalizeIdentifierType(\n      submittedData\n        .company_identifier_type ?? null,\n    ),\n\n  company_identifier_value:\n    identifier.visible,\n\n  company_identifier_value_normalized:\n    identifier.normalized,\n\n  legal_name:\n    normalizeCommonString(\n      submittedData.legal_name ?? null,\n    ),\n\n  primary_contact_first_name:\n    normalizeCommonString(\n      submittedData\n        .primary_contact_first_name ?? null,\n    ),\n\n  primary_contact_last_name:\n    normalizeCommonString(\n      submittedData\n        .primary_contact_last_name ?? null,\n    ),\n\n  primary_contact_email:\n    normalizeEmail(\n      submittedData\n        .primary_contact_email ?? null,\n    ),\n\n  primary_contact_phone:\n    normalizePhone(\n      submittedData\n        .primary_contact_phone ?? null,\n    ),\n};\n\nconst normalizedFields =\n  Object.keys(\n    recalculatedNormalizedData,\n  );\n\nconst persistedFields =\n  Object.keys(\n    persistedNormalizedData,\n  );\n\nconst normalizedDataMatches =\n  normalizedFields.length ===\n    persistedFields.length &&\n  normalizedFields.every(\n    (fieldName) =>\n      persistedNormalizedData[fieldName] ===\n      recalculatedNormalizedData[fieldName],\n  );\n\nif (!normalizedDataMatches) {\n  return [\n    {\n      json: {\n        workflow: 'WF03',\n\n        validation_decision:\n          'invalid_authoritative_context',\n\n        error_code:\n          'persisted_normalization_mismatch',\n\n        case_id:\n          row.case_id,\n\n        submission_id:\n          row.submission_id,\n\n        correlation_id:\n          row.correlation_id,\n\n        client_response_key:\n          'technical_failure',\n      },\n    },\n  ];\n}\n\nconst validationErrors = [];\n\nfunction addRequiredError(\n  fieldName,\n  value,\n) {\n  if (value === null) {\n    validationErrors.push({\n      field: fieldName,\n      code: 'required',\n    });\n\n    return true;\n  }\n\n  return false;\n}\n\nconst normalized =\n  recalculatedNormalizedData;\n\nif (\n  !addRequiredError(\n    'company_identifier_country',\n    normalized\n      .company_identifier_country,\n  ) &&\n  !/^[A-Z]{2}$/.test(\n    normalized\n      .company_identifier_country,\n  )\n) {\n  validationErrors.push({\n    field:\n      'company_identifier_country',\n    code: 'invalid_format',\n  });\n}\n\nif (\n  !addRequiredError(\n    'company_identifier_type',\n    normalized\n      .company_identifier_type,\n  ) &&\n  !/^[a-z0-9][a-z0-9_-]{0,63}$/.test(\n    normalized\n      .company_identifier_type,\n  )\n) {\n  validationErrors.push({\n    field:\n      'company_identifier_type',\n    code: 'invalid_format',\n  });\n}\n\naddRequiredError(\n  'company_identifier_value',\n  normalized\n    .company_identifier_value,\n);\n\nif (\n  !addRequiredError(\n    'company_identifier_value_normalized',\n    normalized\n      .company_identifier_value_normalized,\n  ) &&\n  !/^[A-Z0-9]{2,64}$/.test(\n    normalized\n      .company_identifier_value_normalized,\n  )\n) {\n  validationErrors.push({\n    field:\n      'company_identifier_value',\n    code: 'invalid_format',\n  });\n}\n\naddRequiredError(\n  'legal_name',\n  normalized.legal_name,\n);\n\naddRequiredError(\n  'primary_contact_first_name',\n  normalized\n    .primary_contact_first_name,\n);\n\naddRequiredError(\n  'primary_contact_last_name',\n  normalized\n    .primary_contact_last_name,\n);\n\nif (\n  !addRequiredError(\n    'primary_contact_email',\n    normalized\n      .primary_contact_email,\n  ) &&\n  !/^[^\\s@]+@[^\\s@]+\\.[^\\s@]+$/u.test(\n    normalized\n      .primary_contact_email,\n  )\n) {\n  validationErrors.push({\n    field:\n      'primary_contact_email',\n    code: 'invalid_format',\n  });\n}\n\nif (\n  !addRequiredError(\n    'primary_contact_phone',\n    normalized\n      .primary_contact_phone,\n  ) &&\n  !/^\\+[1-9][0-9]{7,14}$/.test(\n    normalized\n      .primary_contact_phone,\n  )\n) {\n  validationErrors.push({\n    field:\n      'primary_contact_phone',\n    code: 'invalid_format',\n  });\n}\n\nconst validationPassed =\n  validationErrors.length === 0;\n\nreturn [\n  {\n    json: {\n      workflow: 'WF03',\n\n      validation_decision:\n        validationPassed\n          ? 'validation_passed'\n          : 'validation_failed',\n\n      case_id:\n        row.case_id,\n\n      correlation_id:\n        row.correlation_id,\n\n      submission_id:\n        row.submission_id,\n\n      submission_sequence:\n        submissionSequence,\n\n      token_id:\n        row.token_id,\n\n      collect_step_id:\n        row.collect_step_id,\n\n      collect_step_attempt_count:\n        Number(\n          row.collect_step_attempt_count,\n        ),\n\n      validate_step_id:\n        row.validate_step_id,\n\n      validate_step_attempt_count:\n        Number(\n          row.validate_step_attempt_count,\n        ),\n\n      normalized_data:\n        normalized,\n\n      validation_errors:\n        validationErrors,\n\n      client_response_key:\n        validationPassed\n          ? 'submission_accepted'\n          : 'submission_requires_correction',\n    },\n  },\n];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        320,
+        -704
+      ],
+      "id": "98208944-a8e5-446d-9e6c-0c8325f97f5b",
+      "name": "Validate Authoritative Submission"
+    },
+    {
+      "parameters": {
+        "rules": {
+          "values": [
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 3
+                },
+                "conditions": [
+                  {
+                    "leftValue": "={{ $json.validation_decision }}",
+                    "rightValue": "validation_passed",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    },
+                    "id": "c3ec67e9-cc70-4f1a-9ade-7c13d7512841"
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "validation_passed"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 3
+                },
+                "conditions": [
+                  {
+                    "id": "5479c6a3-3a7b-4744-8535-8fa41a7fbad4",
+                    "leftValue": "={{ $json.validation_decision }}",
+                    "rightValue": "validation_failed",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals",
+                      "name": "filter.operator.equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "validation_failed"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 3
+                },
+                "conditions": [
+                  {
+                    "id": "744abd19-3fc8-4874-b274-27b6844166c4",
+                    "leftValue": "={{ $json.validation_decision }}",
+                    "rightValue": "invalid_authoritative_context",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals",
+                      "name": "filter.operator.equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "invalid_authoritative_context"
+            }
+          ]
+        },
+        "options": {
+          "fallbackOutput": "extra"
+        }
+      },
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 3.4,
+      "position": [
+        704,
+        -736
+      ],
+      "id": "53054afd-ddb9-436d-b245-b5e034838b4b",
+      "name": "Route Business Validation"
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "WITH finalized AS (\n    SELECT *\n    FROM finalize_wf03_validation(\n        $1::uuid,\n        $2::uuid,\n        $3::text,\n        $4::jsonb\n    )\n)\nSELECT\n    $5::jsonb AS input_context,\n    finalized.*\nFROM finalized;",
+        "options": {
+          "queryReplacement": "={{\n[\n  $json.case_id,\n  $json.submission_id,\n\n  $json.validation_decision === 'validation_passed'\n    ? 'passed'\n    : 'failed',\n\n  JSON.stringify(\n    $json.validation_errors ?? []\n  ),\n\n  JSON.stringify({\n    workflow:\n      $json.workflow,\n\n    invocation_mode:\n      $json.invocation_mode ?? null,\n\n    case_id:\n      $json.case_id,\n\n    correlation_id:\n      $json.correlation_id,\n\n    submission_id:\n      $json.submission_id,\n\n    submission_sequence:\n      $json.submission_sequence,\n\n    validation_decision:\n      $json.validation_decision,\n\n    client_response_key:\n      $json.client_response_key\n  })\n]\n}}"
+        }
+      },
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        960,
+        -736
+      ],
+      "id": "4ca79ed5-8ca8-4bdd-b3a1-c4540dd9d878",
+      "name": "Finalize Business Validation",
+      "credentials": {
+        "postgres": {
+          "id": "zU4wPvkQFRBSwH0b",
+          "name": "B2B Onboarding App DB"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const items = $input.all();\n\nfunction isPlainObject(value) {\n  return (\n    value !== null &&\n    typeof value === 'object' &&\n    !Array.isArray(value)\n  );\n}\n\nfunction isUuid(value) {\n  return (\n    typeof value === 'string' &&\n    /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i\n      .test(value)\n  );\n}\n\nfunction normalizeInvocationMode(value) {\n  if (\n    value === 'form_submission' ||\n    value === 'recovery'\n  ) {\n    return value;\n  }\n\n  return null;\n}\n\nfunction buildInvalidResult(\n  errorCode,\n  row = {},\n  inputContext = {},\n) {\n  return [\n    {\n      json: {\n        workflow: 'WF03',\n\n        invocation_mode:\n          normalizeInvocationMode(\n            inputContext.invocation_mode,\n          ),\n\n        finalization_decision:\n          'invalid_finalization_result',\n\n        error_code:\n          errorCode,\n\n        finalization_outcome:\n          typeof row.finalization_outcome === 'string'\n            ? row.finalization_outcome\n            : null,\n\n        case_id:\n          isUuid(inputContext.case_id)\n            ? inputContext.case_id\n            : null,\n\n        submission_id:\n          isUuid(inputContext.submission_id)\n            ? inputContext.submission_id\n            : null,\n\n        correlation_id:\n          isUuid(inputContext.correlation_id)\n            ? inputContext.correlation_id\n            : null,\n\n        client_response_key:\n          'technical_failure',\n      },\n    },\n  ];\n}\n\nif (items.length !== 1) {\n  return buildInvalidResult(\n    'validation_finalization_item_count_invalid',\n  );\n}\n\nconst row = items[0].json ?? {};\n\nconst inputContext =\n  isPlainObject(row.input_context)\n    ? row.input_context\n    : {};\n\nconst invocationMode =\n  normalizeInvocationMode(\n    inputContext.invocation_mode,\n  );\n\nif (invocationMode === null) {\n  return buildInvalidResult(\n    'invocation_mode_missing_or_invalid',\n    row,\n    inputContext,\n  );\n}\n\nconst finalizationOutcome =\n  typeof row.finalization_outcome === 'string'\n    ? row.finalization_outcome.trim()\n    : '';\n\nconst finalValidationStatus =\n  typeof row.final_validation_status === 'string'\n    ? row.final_validation_status.trim()\n    : '';\n\nconst finalCaseState =\n  typeof row.final_case_state === 'string'\n    ? row.final_case_state.trim()\n    : '';\n\nconst finalCollectStepStatus =\n  typeof row.final_collect_step_status === 'string'\n    ? row.final_collect_step_status.trim()\n    : '';\n\nconst finalValidateStepStatus =\n  typeof row.final_validate_step_status === 'string'\n    ? row.final_validate_step_status.trim()\n    : '';\n\nconst finalClientId =\n  typeof row.final_client_id === 'string' &&\n  row.final_client_id.trim() !== ''\n    ? row.final_client_id.trim()\n    : null;\n\nconst successfulOutcomes = new Set([\n  'finalized',\n  'already_finalized',\n]);\n\nif (successfulOutcomes.has(finalizationOutcome)) {\n  if (\n    finalValidationStatus === 'passed' &&\n    finalCaseState === 'awaiting_approval' &&\n    finalCollectStepStatus === 'completed' &&\n    finalValidateStepStatus === 'completed' &&\n    isUuid(finalClientId)\n  ) {\n    return [\n      {\n        json: {\n          workflow: 'WF03',\n\n          invocation_mode:\n            invocationMode,\n\n          finalization_decision:\n            'validation_passed_finalized',\n\n          finalization_outcome:\n            finalizationOutcome,\n\n          case_id:\n            inputContext.case_id,\n\n          correlation_id:\n            inputContext.correlation_id,\n\n          submission_id:\n            inputContext.submission_id,\n\n          submission_sequence:\n            Number(\n              inputContext.submission_sequence,\n            ),\n\n          client_id:\n            finalClientId,\n\n          final_case_state:\n            finalCaseState,\n\n          client_response_key:\n            'submission_accepted',\n        },\n      },\n    ];\n  }\n\n  if (\n    finalValidationStatus === 'failed' &&\n    finalCaseState === 'validation_failed' &&\n    finalCollectStepStatus === 'in_progress' &&\n    finalValidateStepStatus === 'pending' &&\n    finalClientId === null\n  ) {\n    return [\n      {\n        json: {\n          workflow: 'WF03',\n\n          invocation_mode:\n            invocationMode,\n\n          finalization_decision:\n            'validation_failed_finalized',\n\n          finalization_outcome:\n            finalizationOutcome,\n\n          case_id:\n            inputContext.case_id,\n\n          correlation_id:\n            inputContext.correlation_id,\n\n          submission_id:\n            inputContext.submission_id,\n\n          submission_sequence:\n            Number(\n              inputContext.submission_sequence,\n            ),\n\n          client_id: null,\n\n          final_case_state:\n            finalCaseState,\n\n          client_response_key:\n            'submission_requires_correction',\n        },\n      },\n    ];\n  }\n\n  return buildInvalidResult(\n    'successful_finalization_state_invalid',\n    row,\n    inputContext,\n  );\n}\n\nif (\n  finalizationOutcome ===\n  'client_identity_conflict'\n) {\n  return [\n    {\n      json: {\n        workflow: 'WF03',\n\n        invocation_mode:\n          invocationMode,\n\n        finalization_decision:\n          'client_identity_conflict',\n\n        finalization_outcome:\n          finalizationOutcome,\n\n        case_id:\n          isUuid(inputContext.case_id)\n            ? inputContext.case_id\n            : null,\n\n        submission_id:\n          isUuid(inputContext.submission_id)\n            ? inputContext.submission_id\n            : null,\n\n        correlation_id:\n          isUuid(inputContext.correlation_id)\n            ? inputContext.correlation_id\n            : null,\n\n        conflicting_client_id:\n          isUuid(finalClientId)\n            ? finalClientId\n            : null,\n\n        client_response_key:\n          'technical_failure',\n      },\n    },\n  ];\n}\n\nreturn buildInvalidResult(\n  'unsupported_finalization_outcome',\n  row,\n  inputContext,\n);"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1136,
+        -736
+      ],
+      "id": "c1420a10-afff-4b8f-90a0-7d354f4ab9c8",
+      "name": "Normalize Validation Finalization"
+    },
+    {
+      "parameters": {
+        "rules": {
+          "values": [
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 3
+                },
+                "conditions": [
+                  {
+                    "leftValue": "={{ $json.finalization_decision }}",
+                    "rightValue": "validation_passed_finalized",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    },
+                    "id": "f0b73f86-d560-4725-839e-e8d5dfe46a2e"
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "validation_passed_finalized"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 3
+                },
+                "conditions": [
+                  {
+                    "id": "e9f01220-8829-4f7c-afd9-f4d922693c58",
+                    "leftValue": "={{ $json.finalization_decision }}",
+                    "rightValue": "validation_failed_finalized",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals",
+                      "name": "filter.operator.equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "validation_failed_finalized"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 3
+                },
+                "conditions": [
+                  {
+                    "id": "f75b6df1-d0d2-4f0a-b471-3d6d29f4b1c8",
+                    "leftValue": "={{ $json.finalization_decision }}",
+                    "rightValue": "client_identity_conflict",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals",
+                      "name": "filter.operator.equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "client_identity_conflict"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 3
+                },
+                "conditions": [
+                  {
+                    "id": "4019d26c-39af-4171-8d93-9ff5eade7f04",
+                    "leftValue": "={{ $json.finalization_decision }}",
+                    "rightValue": "invalid_finalization_result",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals",
+                      "name": "filter.operator.equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "invalid_finalization_result"
+            }
+          ]
+        },
+        "options": {
+          "fallbackOutput": "extra"
+        }
+      },
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 3.4,
+      "position": [
+        1312,
+        -736
+      ],
+      "id": "11ad6028-a12f-4bdc-a475-50a69bacdac7",
+      "name": "Route Validation Finalization"
+    },
+    {
+      "parameters": {
+        "operation": "completion",
+        "completionTitle": "Information received",
+        "completionMessage": "Thank you. Your information has been received and will now be reviewed.",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.form",
+      "typeVersion": 2.5,
+      "position": [
+        2784,
+        -1200
+      ],
+      "id": "a2b1d033-6c2c-42ed-8789-b11cb441fbfd",
+      "name": "Show Submission Accepted",
+      "webhookId": "79356bdc-60c5-4544-8320-1765eae61e2f"
+    },
+    {
+      "parameters": {
+        "operation": "completion",
+        "completionTitle": "Additional information is required",
+        "completionMessage": "Some information could not be accepted. A new form link will be sent to your email.",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.form",
+      "typeVersion": 2.5,
+      "position": [
+        3520,
+        -752
+      ],
+      "id": "0b998fcb-5198-4cc5-9d6f-235d14e03333",
+      "name": "Show Submission Requires Correction",
+      "webhookId": "0b1f2df3-c5f7-4ea3-9f81-bb157735c32c"
+    },
+    {
+      "parameters": {
+        "jsCode": "const items = $input.all();\n\nconst input =\n  items.length === 1\n    ? items[0].json ?? {}\n    : {};\n\nconst UUID_PATTERN =\n  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;\n\nfunction optionalUuid(value) {\n  if (typeof value !== 'string') {\n    return null;\n  }\n\n  const normalized =\n    value.trim().toLowerCase();\n\n  return UUID_PATTERN.test(normalized)\n    ? normalized\n    : null;\n}\n\nfunction safeText(\n  value,\n  maximumLength = 500,\n) {\n  if (\n    value === null ||\n    value === undefined\n  ) {\n    return null;\n  }\n\n  const normalized = String(value)\n    .replace(\n      /[\\u0000-\\u0008\\u000B\\u000C\\u000E-\\u001F\\u007F]/g,\n      ' ',\n    )\n    .replace(/\\s+/g, ' ')\n    .trim();\n\n  return normalized\n    ? normalized.slice(0, maximumLength)\n    : null;\n}\n\nfunction normalizeInvocationMode(value) {\n  if (\n    value === 'form_submission' ||\n    value === 'recovery'\n  ) {\n    return value;\n  }\n\n  return null;\n}\n\nconst decision =\n  safeText(\n    input.finalization_decision ??\n    input.correction_decision ??\n    input.validation_decision ??\n    input.authorization_decision ??\n    input.intake_decision ??\n    'unknown',\n    120,\n  ) ?? 'unknown';\n\nconst dispatchError =\n  safeText(\n    typeof input.error === 'string'\n      ? input.error\n      : (\n          input.error &&\n          typeof input.error === 'object'\n            ? input.error.message\n            : null\n        ),\n    1000,\n  );\n\nconst invocationMode =\n  normalizeInvocationMode(\n    input.invocation_mode,\n  ) ??\n  (\n    input.intake_decision !== undefined ||\n    input.authorization_decision !== undefined\n      ? 'form_submission'\n      : null\n  );\n\nconst dispatchFailure =\n  dispatchError !== null;\n\nlet errorClass;\nlet retryable;\nlet severity;\nlet requiresIntervention;\n\nif (\n  decision ===\n  'client_identity_conflict'\n) {\n  errorClass =\n    'client_identity_conflict';\n\n  retryable = false;\n  severity = 'error';\n  requiresIntervention = true;\n\n} else if (dispatchFailure) {\n  errorClass =\n    'dispatch_failure';\n\n  // WF98 can later recover missing WF02\n  // or WF04 dispatches from persisted state.\n  retryable = true;\n  severity = 'warning';\n  requiresIntervention = false;\n\n} else {\n  errorClass =\n    'workflow_contract_failure';\n\n  retryable = false;\n  severity = 'error';\n  requiresIntervention = true;\n}\n\nconst errorCode =\n  safeText(\n    input.error_code ??\n    input.finalization_outcome ??\n    input.consume_outcome ??\n    input.wf02_result ??\n    (\n      dispatchFailure\n        ? 'subworkflow_dispatch_failed'\n        : 'wf03_unexpected_result'\n    ),\n    120,\n  );\n\nconst errorMessage =\n  dispatchFailure\n    ? 'WF03 could not start or complete a required sub-workflow.'\n    : 'WF03 could not complete client data processing.';\n\nreturn [\n  {\n    json: {\n      // WF99 explicit internal contract.\n      source_variant:\n        'explicit_internal',\n\n      source_workflow_name:\n        'WF03 — Receive and Validate Client Data',\n\n      source_workflow_id:\n        safeText(\n          $workflow.id,\n          120,\n        ),\n\n      source_execution_id:\n        safeText(\n          $execution.id,\n          120,\n        ),\n\n      case_id:\n        optionalUuid(\n          input.case_id,\n        ),\n\n      correlation_id:\n        optionalUuid(\n          input.correlation_id,\n        ),\n\n      step_id: null,\n\n      submission_id:\n        optionalUuid(\n          input.submission_id ??\n          input.failed_submission_id,\n        ),\n\n      external_operation_id:\n        optionalUuid(\n          input.external_operation_id,\n        ),\n\n      error_class:\n        errorClass,\n\n      error_code:\n        errorCode,\n\n      error_message:\n        errorMessage,\n\n      retryable:\n        retryable,\n\n      severity:\n        severity,\n\n      requires_intervention:\n        requiresIntervention,\n\n      error_details: {\n        invocation_mode:\n          invocationMode,\n\n        continuation_kind:\n          safeText(\n            input.continuation_kind,\n            120,\n          ),\n\n        decision:\n          decision,\n\n        dispatch_error:\n          dispatchError,\n\n        error_codes:\n          Array.isArray(\n            input.error_codes,\n          )\n            ? input.error_codes\n                .slice(0, 20)\n            : [],\n\n        finalization_outcome:\n          safeText(\n            input.finalization_outcome,\n            120,\n          ),\n\n        consume_outcome:\n          safeText(\n            input.consume_outcome,\n            120,\n          ),\n\n        wf02_result:\n          safeText(\n            input.wf02_result,\n            120,\n          ),\n\n        received_item_count:\n          items.length,\n      },\n    },\n  },\n];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        3152,
+        -224
+      ],
+      "id": "ed8d2d4c-de70-4621-be4a-4968a0404043",
+      "name": "Build WF03 Technical Failure"
+    },
+    {
+      "parameters": {
+        "workflowId": {
+          "__rl": true,
+          "value": "WykBM7mvCOqph91a",
+          "mode": "list",
+          "cachedResultUrl": "/workflow/WykBM7mvCOqph91a",
+          "cachedResultName": "WF99 - Central Error Handler"
+        },
+        "workflowInputs": {
+          "mappingMode": "defineBelow",
+          "value": {},
+          "matchingColumns": [],
+          "schema": [],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": true
+        },
+        "options": {
+          "waitForSubWorkflow": true
+        }
+      },
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1.3,
+      "position": [
+        3568,
+        -224
+      ],
+      "id": "dbce4a52-f2c7-495e-8a2e-6057fbf0accb",
+      "name": "Handle WF03 Failure in WF99",
+      "alwaysOutputData": true,
+      "onError": "continueErrorOutput"
+    },
+    {
+      "parameters": {
+        "operation": "completion",
+        "completionTitle": "We could not complete this request",
+        "completionMessage": "Please contact your onboarding representative and try again later.",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.form",
+      "typeVersion": 2.5,
+      "position": [
+        4560,
+        -384
+      ],
+      "id": "1c5ca164-c42f-4551-b425-77debfc0b41d",
+      "name": "Show Technical Failure",
+      "webhookId": "9ebac9a4-f3fd-4573-ae87-83168fa8a2af"
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "const input = $json ?? {};\n\nconst UUID_PATTERN =\n  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;\n\nfunction requireUuid(value, fieldName) {\n  if (typeof value !== 'string') {\n    throw new Error(\n      `${fieldName} must be a UUID string`,\n    );\n  }\n\n  const normalized =\n    value.trim().toLowerCase();\n\n  if (!UUID_PATTERN.test(normalized)) {\n    throw new Error(\n      `${fieldName} must be a valid UUID`,\n    );\n  }\n\n  return normalized;\n}\n\nfunction requireInvocationMode(value) {\n  if (\n    value !== 'form_submission' &&\n    value !== 'recovery'\n  ) {\n    throw new Error(\n      'invocation_mode must be form_submission or recovery',\n    );\n  }\n\n  return value;\n}\n\nconst caseId = requireUuid(\n  input.case_id,\n  'case_id',\n);\n\nconst correlationId = requireUuid(\n  input.correlation_id,\n  'correlation_id',\n);\n\nconst submissionId = requireUuid(\n  input.submission_id,\n  'submission_id',\n);\n\nconst invocationMode =\n  requireInvocationMode(\n    input.invocation_mode,\n  );\n\nconst requestCycleKey =\n  `validation_failed:${submissionId}`;\n\nreturn {\n  json: {\n    workflow: 'WF03',\n\n    invocation_mode:\n      invocationMode,\n\n    continuation_kind:\n      'correction_dispatch',\n\n    case_id:\n      caseId,\n\n    correlation_id:\n      correlationId,\n\n    trigger_source:\n      'wf03',\n\n    request_cycle_key:\n      requestCycleKey,\n\n    failed_submission_id:\n      submissionId,\n  },\n};"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1600,
+        -720
+      ],
+      "id": "953466d8-7d64-40ce-ac06-85856f031b30",
+      "name": "Build WF02 Correction Request"
+    },
+    {
+      "parameters": {
+        "workflowId": {
+          "__rl": true,
+          "value": "l2oJE1KtPg4QuE89",
+          "mode": "list",
+          "cachedResultUrl": "/workflow/l2oJE1KtPg4QuE89",
+          "cachedResultName": "WF02 - Request Client Data - Implementation Complete"
+        },
+        "workflowInputs": {
+          "mappingMode": "defineBelow",
+          "value": {},
+          "matchingColumns": [],
+          "schema": [],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": true
+        },
+        "options": {
+          "waitForSubWorkflow": true
+        }
+      },
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1.3,
+      "position": [
+        2048,
+        -512
+      ],
+      "id": "b2255313-9c9e-44a2-b087-96cf6031b6cc",
+      "name": "Dispatch Correction Request to WF02",
+      "alwaysOutputData": true,
+      "onError": "continueErrorOutput"
+    },
+    {
+      "parameters": {
+        "mode": "combine",
+        "combineBy": "combineByPosition",
+        "options": {
+          "clashHandling": {
+            "values": {
+              "resolveClash": "preferLast"
+            }
+          }
+        }
+      },
+      "type": "n8n-nodes-base.merge",
+      "typeVersion": 3.2,
+      "position": [
+        2256,
+        -640
+      ],
+      "id": "36572bb3-7787-4347-92bf-acc7d22edbb5",
+      "name": "Merge WF02 Correction Context"
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "const input = $json ?? {};\n\nconst UUID_PATTERN =\n  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;\n\nfunction isUuid(value) {\n  return (\n    typeof value === 'string' &&\n    UUID_PATTERN.test(value.trim())\n  );\n}\n\nfunction normalizeInvocationMode(value) {\n  if (\n    value === 'form_submission' ||\n    value === 'recovery'\n  ) {\n    return value;\n  }\n\n  return null;\n}\n\nconst invocationMode =\n  normalizeInvocationMode(\n    input.invocation_mode,\n  );\n\nfunction invalidResult(errorCode) {\n  return {\n    json: {\n      source_workflow:\n        'WF03',\n\n      invocation_mode:\n        invocationMode,\n\n      continuation_kind:\n        'correction_dispatch',\n\n      correction_decision:\n        'invalid_result',\n\n      error_code:\n        errorCode,\n\n      case_id:\n        isUuid(input.case_id)\n          ? input.case_id\n          : null,\n\n      correlation_id:\n        isUuid(input.correlation_id)\n          ? input.correlation_id\n          : null,\n\n      submission_id:\n        isUuid(\n          input.failed_submission_id,\n        )\n          ? input.failed_submission_id\n          : null,\n\n      wf02_result:\n        typeof input.result === 'string'\n          ? input.result\n          : null,\n\n      client_response_key:\n        'technical_failure',\n    },\n  };\n}\n\nif (invocationMode === null) {\n  return invalidResult(\n    'correction_invocation_mode_invalid',\n  );\n}\n\nconst caseId =\n  isUuid(input.case_id)\n    ? input.case_id\n        .trim()\n        .toLowerCase()\n    : null;\n\nconst correlationId =\n  isUuid(input.correlation_id)\n    ? input.correlation_id\n        .trim()\n        .toLowerCase()\n    : null;\n\nconst submissionId =\n  isUuid(input.failed_submission_id)\n    ? input.failed_submission_id\n        .trim()\n        .toLowerCase()\n    : null;\n\nconst result =\n  typeof input.result === 'string'\n    ? input.result.trim()\n    : '';\n\nif (\n  caseId === null ||\n  correlationId === null ||\n  submissionId === null\n) {\n  return invalidResult(\n    'correction_identity_missing',\n  );\n}\n\nconst expectedCycle =\n  `validation_failed:${submissionId}`;\n\nif (\n  input.request_cycle_key !==\n  expectedCycle\n) {\n  return invalidResult(\n    'correction_cycle_mismatch',\n  );\n}\n\nif (\n  result === 'delivered' ||\n  result === 'already_delivered'\n) {\n  if (\n    input.operation_status !==\n      'succeeded' ||\n    input.case_state !==\n      'awaiting_client_data'\n  ) {\n    return invalidResult(\n      'delivered_state_invalid',\n    );\n  }\n\n  return {\n    json: {\n      workflow:\n        'WF03',\n\n      invocation_mode:\n        invocationMode,\n\n      continuation_kind:\n        'correction_dispatch',\n\n      correction_decision:\n        'correction_ready',\n\n      case_id:\n        caseId,\n\n      correlation_id:\n        correlationId,\n\n      submission_id:\n        submissionId,\n\n      request_cycle_key:\n        expectedCycle,\n\n      wf02_result:\n        result,\n\n      external_operation_id:\n        isUuid(\n          input.external_operation_id,\n        )\n          ? input.external_operation_id\n          : null,\n    },\n  };\n}\n\nif (\n  result === 'failed_retryable' ||\n  result === 'busy' ||\n  result === 'not_due'\n) {\n  return {\n    json: {\n      workflow:\n        'WF03',\n\n      invocation_mode:\n        invocationMode,\n\n      continuation_kind:\n        'correction_dispatch',\n\n      correction_decision:\n        'correction_scheduled',\n\n      case_id:\n        caseId,\n\n      correlation_id:\n        correlationId,\n\n      submission_id:\n        submissionId,\n\n      request_cycle_key:\n        expectedCycle,\n\n      wf02_result:\n        result,\n\n      external_operation_id:\n        isUuid(\n          input.external_operation_id,\n        )\n          ? input.external_operation_id\n          : null,\n\n      next_retry_at:\n        typeof input.next_retry_at ===\n          'string'\n          ? input.next_retry_at\n          : null,\n    },\n  };\n}\n\nif (result === 'failed_terminal') {\n  return {\n    json: {\n      source_workflow:\n        'WF03',\n\n      invocation_mode:\n        invocationMode,\n\n      continuation_kind:\n        'correction_dispatch',\n\n      correction_decision:\n        'terminal_failure',\n\n      error_code:\n        'wf02_correction_terminal_failure',\n\n      case_id:\n        caseId,\n\n      correlation_id:\n        correlationId,\n\n      submission_id:\n        submissionId,\n\n      wf02_result:\n        result,\n\n      external_operation_id:\n        isUuid(\n          input.external_operation_id,\n        )\n          ? input.external_operation_id\n          : null,\n\n      client_response_key:\n        'technical_failure',\n    },\n  };\n}\n\nreturn invalidResult(\n  result === 'not_required'\n    ? 'wf02_correction_not_required'\n    : 'unsupported_wf02_result',\n);"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2496,
+        -672
+      ],
+      "id": "ce6db492-ccd9-4a03-b24a-b5577e72fcd7",
+      "name": "Normalize WF02 Correction Result"
+    },
+    {
+      "parameters": {
+        "rules": {
+          "values": [
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 3
+                },
+                "conditions": [
+                  {
+                    "leftValue": "={{ $json.correction_decision }}",
+                    "rightValue": "correction_ready",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    },
+                    "id": "bbc784a8-9edb-4b00-b948-638090ee01d4"
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "correction_ready"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 3
+                },
+                "conditions": [
+                  {
+                    "id": "48535bf2-9f05-4c66-bcfd-62fd942b4f17",
+                    "leftValue": "={{ $json.correction_decision }}",
+                    "rightValue": "correction_scheduled",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals",
+                      "name": "filter.operator.equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "correction_scheduled"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 3
+                },
+                "conditions": [
+                  {
+                    "id": "666697a7-e0ea-447d-bf52-0047ded6a89c",
+                    "leftValue": "={{ $json.correction_decision }}",
+                    "rightValue": "terminal_failure",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals",
+                      "name": "filter.operator.equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "terminal_failure"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 3
+                },
+                "conditions": [
+                  {
+                    "id": "db8f3c16-47f4-40c8-a8e4-fdd3bf1c3c36",
+                    "leftValue": "={{ $json.correction_decision }}",
+                    "rightValue": "invalid_result",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals",
+                      "name": "filter.operator.equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "invalid_result"
+            }
+          ]
+        },
+        "options": {
+          "fallbackOutput": "extra"
+        }
+      },
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 3.4,
+      "position": [
+        2688,
+        -720
+      ],
+      "id": "464d6823-88c8-449e-b9b3-ae0c755a5e18",
+      "name": "Route WF02 Correction Result"
+    },
+    {
+      "parameters": {
+        "workflowId": {
+          "__rl": true,
+          "value": "I6nqXCOFa3qycHtY",
+          "mode": "list",
+          "cachedResultUrl": "/workflow/I6nqXCOFa3qycHtY",
+          "cachedResultName": "WF04 - Manual Approval"
+        },
+        "workflowInputs": {
+          "mappingMode": "defineBelow",
+          "value": {},
+          "matchingColumns": [],
+          "schema": [],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": true
+        },
+        "options": {
+          "waitForSubWorkflow": false
+        }
+      },
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1.3,
+      "position": [
+        1936,
+        -832
+      ],
+      "id": "6a253855-a1db-4325-9d76-4816e528ae3f",
+      "name": "Dispatch Approval Request to WF04",
+      "alwaysOutputData": true,
+      "onError": "continueErrorOutput"
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "const input = $json ?? {};\n\nconst UUID_PATTERN =\n  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;\n\nfunction requireUuid(value, fieldName) {\n  if (typeof value !== 'string') {\n    throw new Error(\n      `${fieldName} must be a UUID string`,\n    );\n  }\n\n  const normalized =\n    value.trim().toLowerCase();\n\n  if (!UUID_PATTERN.test(normalized)) {\n    throw new Error(\n      `${fieldName} must be a valid UUID`,\n    );\n  }\n\n  return normalized;\n}\n\nfunction requireInvocationMode(value) {\n  if (\n    value !== 'form_submission' &&\n    value !== 'recovery'\n  ) {\n    throw new Error(\n      'invocation_mode must be form_submission or recovery',\n    );\n  }\n\n  return value;\n}\n\nif (\n  input.finalization_decision !==\n  'validation_passed_finalized'\n) {\n  throw new Error(\n    'WF04 approval request requires successful WF03 validation',\n  );\n}\n\nif (\n  input.final_case_state !==\n  'awaiting_approval'\n) {\n  throw new Error(\n    'WF04 approval request requires awaiting_approval case state',\n  );\n}\n\nreturn {\n  json: {\n    workflow:\n      'WF03',\n\n    invocation_mode:\n      requireInvocationMode(\n        input.invocation_mode,\n      ),\n\n    continuation_kind:\n      'approval_dispatch',\n\n    case_id:\n      requireUuid(\n        input.case_id,\n        'case_id',\n      ),\n\n    correlation_id:\n      requireUuid(\n        input.correlation_id,\n        'correlation_id',\n      ),\n\n    trigger_source:\n      'wf03',\n  },\n};"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1520,
+        -880
+      ],
+      "id": "af7944cb-a916-4a0b-9aac-b413f9cbafb8",
+      "name": "Build WF04 Approval Request"
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "return {\n  json: {\n    ...$json,\n\n    invocation_mode:\n      'form_submission',\n  },\n};"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -64,
+        -672
+      ],
+      "id": "18b9b144-a1a3-4bff-a07a-55893213d590",
+      "name": "Mark Form Submission Invocation"
+    },
+    {
+      "parameters": {
+        "mode": "combine",
+        "combineBy": "combineByPosition",
+        "options": {
+          "clashHandling": {
+            "values": {
+              "resolveClash": "preferLast"
+            }
+          }
+        }
+      },
+      "type": "n8n-nodes-base.merge",
+      "typeVersion": 3.2,
+      "position": [
+        528,
+        -832
+      ],
+      "id": "14b0fdf6-c604-4830-8a49-213a6992a304",
+      "name": "Merge Authoritative Validation Context"
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "const rawInput = $json ?? {};\n\nfunction isPlainObject(value) {\n  return (\n    value !== null &&\n    typeof value === 'object' &&\n    !Array.isArray(value)\n  );\n}\n\nconst input =\n  isPlainObject(rawInput.body)\n    ? rawInput.body\n    : rawInput;\n\nconst UUID_PATTERN =\n  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;\n\nfunction requireUuid(value, fieldName) {\n  if (typeof value !== 'string') {\n    throw new Error(\n      `${fieldName} must be a UUID string`,\n    );\n  }\n\n  const normalized =\n    value.trim().toLowerCase();\n\n  if (!UUID_PATTERN.test(normalized)) {\n    throw new Error(\n      `${fieldName} must be a valid UUID`,\n    );\n  }\n\n  return normalized;\n}\n\nconst allowedFields = new Set([\n  'case_id',\n  'correlation_id',\n  'submission_id',\n  'trigger_source',\n  'recovery_reason',\n]);\n\nconst unknownFields =\n  Object.keys(input).filter(\n    (fieldName) =>\n      !allowedFields.has(fieldName),\n  );\n\nif (unknownFields.length > 0) {\n  throw new Error(\n    `WF03 recovery invocation contains unsupported fields: ${unknownFields.join(', ')}`,\n  );\n}\n\nif (input.trigger_source !== 'wf98') {\n  throw new Error(\n    'WF03 recovery invocation requires trigger_source wf98',\n  );\n}\n\nif (\n  input.recovery_reason !==\n  'pending_submission_validation'\n) {\n  throw new Error(\n    'WF03 received an unsupported recovery_reason',\n  );\n}\n\nreturn {\n  json: {\n    workflow: 'WF03',\n\n    invocation_mode: 'recovery',\n\n    case_id: requireUuid(\n      input.case_id,\n      'case_id',\n    ),\n\n    correlation_id: requireUuid(\n      input.correlation_id,\n      'correlation_id',\n    ),\n\n    submission_id: requireUuid(\n      input.submission_id,\n      'submission_id',\n    ),\n\n    submission_sequence: null,\n\n    trigger_source: 'wf98',\n\n    recovery_reason:\n      'pending_submission_validation',\n  },\n};"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -480,
+        -864
+      ],
+      "id": "11b6c977-e828-40fc-b403-529569023c7f",
+      "name": "Normalize WF03 Recovery Invocation"
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "const input = $json ?? {};\n\nconst UUID_PATTERN =\n  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;\n\nfunction requireUuid(\n  value,\n  fieldName,\n) {\n  if (typeof value !== 'string') {\n    throw new Error(\n      `${fieldName} must be a UUID string`,\n    );\n  }\n\n  const normalized =\n    value.trim().toLowerCase();\n\n  if (!UUID_PATTERN.test(normalized)) {\n    throw new Error(\n      `${fieldName} must be a valid UUID`,\n    );\n  }\n\n  return normalized;\n}\n\nconst caseId = requireUuid(\n  input.case_id,\n  'case_id',\n);\n\nconst correlationId = requireUuid(\n  input.correlation_id,\n  'correlation_id',\n);\n\nconst failedSubmissionId = requireUuid(\n  input.failed_submission_id,\n  'failed_submission_id',\n);\n\nconst expectedRequestCycleKey =\n  `validation_failed:${failedSubmissionId}`;\n\nif (\n  input.request_cycle_key !==\n  expectedRequestCycleKey\n) {\n  throw new Error(\n    'request_cycle_key does not match failed_submission_id',\n  );\n}\n\nif (input.trigger_source !== 'wf03') {\n  throw new Error(\n    'trigger_source must equal wf03',\n  );\n}\n\n// Return only the explicit WF02 correction contract.\n// WF03-local routing fields must not leave WF03.\nreturn {\n  json: {\n    case_id:\n      caseId,\n\n    correlation_id:\n      correlationId,\n\n    trigger_source:\n      'wf03',\n\n    request_cycle_key:\n      expectedRequestCycleKey,\n\n    failed_submission_id:\n      failedSubmissionId,\n  },\n};"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1824,
+        -576
+      ],
+      "id": "f23a7a59-55e0-405f-88e4-70553ee45fc0",
+      "name": "Build WF02 Correction Dispatch Input"
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "const input = $json ?? {};\n\nconst UUID_PATTERN =\n  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;\n\nfunction requireUuid(value, fieldName) {\n  if (typeof value !== 'string') {\n    throw new Error(\n      `${fieldName} must be a UUID string`,\n    );\n  }\n\n  const normalized =\n    value.trim().toLowerCase();\n\n  if (!UUID_PATTERN.test(normalized)) {\n    throw new Error(\n      `${fieldName} must be a valid UUID`,\n    );\n  }\n\n  return normalized;\n}\n\nif (input.trigger_source !== 'wf03') {\n  throw new Error(\n    'trigger_source must equal wf03',\n  );\n}\n\nreturn {\n  json: {\n    case_id: requireUuid(\n      input.case_id,\n      'case_id',\n    ),\n\n    correlation_id: requireUuid(\n      input.correlation_id,\n      'correlation_id',\n    ),\n\n    trigger_source: 'wf03',\n  },\n};"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1728,
+        -864
+      ],
+      "id": "b1de65ff-6d9f-4e7a-bf1f-5fd5c8387c92",
+      "name": "Build WF04 Approval Dispatch Input"
+    },
+    {
+      "parameters": {
+        "mode": "combine",
+        "combineBy": "combineByPosition",
+        "options": {
+          "clashHandling": {
+            "values": {
+              "resolveClash": "preferLast"
+            }
+          }
+        }
+      },
+      "type": "n8n-nodes-base.merge",
+      "typeVersion": 3.2,
+      "position": [
+        2224,
+        -1008
+      ],
+      "id": "4f9ebb44-8945-4016-91bd-08892a58200a",
+      "name": "Merge WF04 Approval Context"
+    },
+    {
+      "parameters": {
+        "rules": {
+          "values": [
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 3
+                },
+                "conditions": [
+                  {
+                    "leftValue": "={{ $json.invocation_mode }}",
+                    "rightValue": "form_submission",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    },
+                    "id": "ebe2ccf3-90be-4d38-9835-73c875b77953"
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "form_submission"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 3
+                },
+                "conditions": [
+                  {
+                    "id": "ccafa68e-be6f-42eb-8f70-68c24b382d41",
+                    "leftValue": "={{ $json.invocation_mode }}",
+                    "rightValue": "recovery",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals",
+                      "name": "filter.operator.equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "recovery"
+            }
+          ]
+        },
+        "options": {
+          "fallbackOutput": "extra"
+        }
+      },
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 3.4,
+      "position": [
+        2432,
+        -1024
+      ],
+      "id": "d3adb4a4-5a58-4af7-a3b2-6e62849ae39c",
+      "name": "Route WF04 Completion Mode"
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "const input = $json ?? {};\n\nconst errorDetails =\n  input.error_details !== null &&\n  typeof input.error_details === 'object' &&\n  !Array.isArray(input.error_details)\n    ? input.error_details\n    : {};\n\nconst invocationMode =\n  input.invocation_mode ??\n  errorDetails.invocation_mode ??\n  null;\n\nif (invocationMode !== 'recovery') {\n  throw new Error(\n    'WF03 recovery completion requires recovery invocation mode',\n  );\n}\n\nconst continuationKind =\n  input.continuation_kind ??\n  errorDetails.continuation_kind ??\n  null;\n\nlet recoveryResult;\nlet completed;\n\nif (continuationKind === 'approval_dispatch') {\n  recoveryResult =\n    'approval_dispatch_started';\n\n  completed = true;\n\n} else if (\n  continuationKind === 'correction_dispatch' &&\n  input.correction_decision === 'correction_ready'\n) {\n  recoveryResult =\n    'correction_delivery_confirmed';\n\n  completed = true;\n\n} else if (\n  continuationKind === 'correction_dispatch' &&\n  input.correction_decision === 'correction_scheduled'\n) {\n  recoveryResult =\n    'correction_delivery_scheduled';\n\n  completed = true;\n\n} else if (\n  input.error_class !== undefined ||\n  input.error_code !== undefined ||\n  input.source_variant === 'explicit_internal'\n) {\n  recoveryResult =\n    'technical_failure_recorded';\n\n  completed = false;\n\n} else {\n  throw new Error(\n    'WF03 received an unsupported recovery completion state',\n  );\n}\n\nreturn {\n  json: {\n    workflow: 'WF03',\n\n    invocation_mode:\n      'recovery',\n\n    recovery_result:\n      recoveryResult,\n\n    case_id:\n      input.case_id ?? null,\n\n    correlation_id:\n      input.correlation_id ?? null,\n\n    submission_id:\n      input.submission_id ?? null,\n\n    wf02_result:\n      input.wf02_result ??\n      errorDetails.wf02_result ??\n      null,\n\n    error_class:\n      input.error_class ?? null,\n\n    error_code:\n      input.error_code ?? null,\n\n    retryable:\n      typeof input.retryable === 'boolean'\n        ? input.retryable\n        : null,\n\n    completed:\n      completed,\n  },\n};"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        4272,
+        -880
+      ],
+      "id": "dc8f6b47-28b7-4318-afa6-43838f6dd146",
+      "name": "Build WF03 Recovery Completion"
+    },
+    {
+      "parameters": {
+        "rules": {
+          "values": [
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 3
+                },
+                "conditions": [
+                  {
+                    "leftValue": "={{ $json.invocation_mode }}",
+                    "rightValue": "form_submission",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    },
+                    "id": "0f23faf3-137d-4cb0-966c-2f0e1720f808"
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "form_submission"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 3
+                },
+                "conditions": [
+                  {
+                    "id": "84f71019-3953-4534-b9a0-a8fe41fa18d1",
+                    "leftValue": "={{ $json.invocation_mode }}",
+                    "rightValue": "recovery",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals",
+                      "name": "filter.operator.equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "recovery"
+            }
+          ]
+        },
+        "options": {
+          "fallbackOutput": "extra"
+        }
+      },
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 3.4,
+      "position": [
+        3008,
+        -736
+      ],
+      "id": "113c2221-fec2-4680-ad13-cc913deb0d75",
+      "name": "Route WF02 Completion Mode"
+    },
+    {
+      "parameters": {
+        "mode": "combine",
+        "combineBy": "combineByPosition",
+        "options": {
+          "clashHandling": {
+            "values": {
+              "resolveClash": "preferLast"
+            }
+          }
+        }
+      },
+      "type": "n8n-nodes-base.merge",
+      "typeVersion": 3.2,
+      "position": [
+        2288,
+        -800
+      ],
+      "id": "862437ad-dbf0-4e21-ac4b-b3921a0b4d1b",
+      "name": "Merge WF04 Approval Error Context"
+    },
+    {
+      "parameters": {
+        "mode": "combine",
+        "combineBy": "combineByPosition",
+        "options": {
+          "clashHandling": {
+            "values": {
+              "resolveClash": "preferLast"
+            }
+          }
+        }
+      },
+      "type": "n8n-nodes-base.merge",
+      "typeVersion": 3.2,
+      "position": [
+        2608,
+        -432
+      ],
+      "id": "b956ed71-a200-4c50-89ee-4be695683a33",
+      "name": "Merge WF02 Correction Error Context"
+    },
+    {
+      "parameters": {
+        "mode": "combine",
+        "combineBy": "combineByPosition",
+        "options": {
+          "clashHandling": {
+            "values": {
+              "resolveClash": "preferLast"
+            }
+          }
+        }
+      },
+      "type": "n8n-nodes-base.merge",
+      "typeVersion": 3.2,
+      "position": [
+        3792,
+        -368
+      ],
+      "id": "0ca0e5cd-8cae-47c7-b184-548f2e5be06e",
+      "name": "Merge WF03 Technical Failure Context"
+    },
+    {
+      "parameters": {
+        "rules": {
+          "values": [
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 3
+                },
+                "conditions": [
+                  {
+                    "leftValue": "={{ $json.error_details?.invocation_mode ?? $json.invocation_mode ?? null }}",
+                    "rightValue": "form_submission",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    },
+                    "id": "e8130a4c-a939-4403-9ee7-3735c10e094a"
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "form_submission"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 3
+                },
+                "conditions": [
+                  {
+                    "id": "0732e4d8-423c-4b76-a173-c1b0616b2972",
+                    "leftValue": "={{ $json.error_details?.invocation_mode ?? $json.invocation_mode ?? null }}",
+                    "rightValue": "recovery",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals",
+                      "name": "filter.operator.equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "recovery"
+            }
+          ]
+        },
+        "options": {
+          "fallbackOutput": "extra"
+        }
+      },
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 3.4,
+      "position": [
+        4016,
+        -384
+      ],
+      "id": "75f70058-3cc2-433c-8b1c-04662edc14bb",
+      "name": "Route Technical Failure Completion Mode"
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Client Data Form": {
+      "main": [
+        [
+          {
+            "node": "Validate Normalize and Hash Form Submission",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Validate Normalize and Hash Form Submission": {
+      "main": [
+        [
+          {
+            "node": "Route Form Intake Decision",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Route Form Intake Decision": {
+      "main": [
+        [
+          {
+            "node": "Consume Form Token and Create Submission",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Show Invalid Submission Result",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Show Invalid Submission Result",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Build WF03 Technical Failure",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Consume Form Token and Create Submission": {
+      "main": [
+        [
+          {
+            "node": "Normalize Token Consumption Outcome",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Normalize Token Consumption Outcome": {
+      "main": [
+        [
+          {
+            "node": "Route Token Consumption Outcome",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Route Token Consumption Outcome": {
+      "main": [
+        [
+          {
+            "node": "Mark Form Submission Invocation",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Show Invalid Submission Result",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Build WF03 Technical Failure",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Build WF03 Technical Failure",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Load Authoritative Submission Context": {
+      "main": [
+        [
+          {
+            "node": "Validate Authoritative Submission",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Validate Authoritative Submission": {
+      "main": [
+        [
+          {
+            "node": "Merge Authoritative Validation Context",
+            "type": "main",
+            "index": 1
+          }
+        ]
+      ]
+    },
+    "Route Business Validation": {
+      "main": [
+        [
+          {
+            "node": "Finalize Business Validation",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Finalize Business Validation",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Build WF03 Technical Failure",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Build WF03 Technical Failure",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Finalize Business Validation": {
+      "main": [
+        [
+          {
+            "node": "Normalize Validation Finalization",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Normalize Validation Finalization": {
+      "main": [
+        [
+          {
+            "node": "Route Validation Finalization",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Route Validation Finalization": {
+      "main": [
+        [
+          {
+            "node": "Build WF04 Approval Request",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Build WF02 Correction Request",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Build WF03 Technical Failure",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Build WF03 Technical Failure",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Build WF03 Technical Failure",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build WF03 Technical Failure": {
+      "main": [
+        [
+          {
+            "node": "Handle WF03 Failure in WF99",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Merge WF03 Technical Failure Context",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Handle WF03 Failure in WF99": {
+      "main": [
+        [
+          {
+            "node": "Merge WF03 Technical Failure Context",
+            "type": "main",
+            "index": 1
+          }
+        ],
+        [
+          {
+            "node": "Merge WF03 Technical Failure Context",
+            "type": "main",
+            "index": 1
+          }
+        ]
+      ]
+    },
+    "Build WF02 Correction Request": {
+      "main": [
+        [
+          {
+            "node": "Merge WF02 Correction Context",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Build WF02 Correction Dispatch Input",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Merge WF02 Correction Error Context",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Dispatch Correction Request to WF02": {
+      "main": [
+        [
+          {
+            "node": "Merge WF02 Correction Context",
+            "type": "main",
+            "index": 1
+          }
+        ],
+        [
+          {
+            "node": "Merge WF02 Correction Error Context",
+            "type": "main",
+            "index": 1
+          }
+        ]
+      ]
+    },
+    "Merge WF02 Correction Context": {
+      "main": [
+        [
+          {
+            "node": "Normalize WF02 Correction Result",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Normalize WF02 Correction Result": {
+      "main": [
+        [
+          {
+            "node": "Route WF02 Correction Result",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Route WF02 Correction Result": {
+      "main": [
+        [
+          {
+            "node": "Route WF02 Completion Mode",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Route WF02 Completion Mode",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Build WF03 Technical Failure",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Build WF03 Technical Failure",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Build WF03 Technical Failure",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Dispatch Approval Request to WF04": {
+      "main": [
+        [
+          {
+            "node": "Merge WF04 Approval Context",
+            "type": "main",
+            "index": 1
+          }
+        ],
+        [
+          {
+            "node": "Merge WF04 Approval Error Context",
+            "type": "main",
+            "index": 1
+          }
+        ]
+      ]
+    },
+    "Build WF04 Approval Request": {
+      "main": [
+        [
+          {
+            "node": "Build WF04 Approval Dispatch Input",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Merge WF04 Approval Context",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Merge WF04 Approval Error Context",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Mark Form Submission Invocation": {
+      "main": [
+        [
+          {
+            "node": "Load Authoritative Submission Context",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Merge Authoritative Validation Context",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Merge Authoritative Validation Context": {
+      "main": [
+        [
+          {
+            "node": "Route Business Validation",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Webhook": {
+      "main": [
+        [
+          {
+            "node": "Normalize WF03 Recovery Invocation",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Internal Invocation Trigger": {
+      "main": [
+        [
+          {
+            "node": "Normalize WF03 Recovery Invocation",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Normalize WF03 Recovery Invocation": {
+      "main": [
+        [
+          {
+            "node": "Load Authoritative Submission Context",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Merge Authoritative Validation Context",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build WF02 Correction Dispatch Input": {
+      "main": [
+        [
+          {
+            "node": "Dispatch Correction Request to WF02",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build WF04 Approval Dispatch Input": {
+      "main": [
+        [
+          {
+            "node": "Dispatch Approval Request to WF04",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Show Submission Accepted": {
+      "main": [
+        []
+      ]
+    },
+    "Merge WF04 Approval Context": {
+      "main": [
+        [
+          {
+            "node": "Route WF04 Completion Mode",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Route WF04 Completion Mode": {
+      "main": [
+        [
+          {
+            "node": "Show Submission Accepted",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Build WF03 Recovery Completion",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Build WF03 Technical Failure",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Route WF02 Completion Mode": {
+      "main": [
+        [
+          {
+            "node": "Show Submission Requires Correction",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Build WF03 Recovery Completion",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Build WF03 Technical Failure",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Merge WF04 Approval Error Context": {
+      "main": [
+        [
+          {
+            "node": "Build WF03 Technical Failure",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Merge WF02 Correction Error Context": {
+      "main": [
+        [
+          {
+            "node": "Build WF03 Technical Failure",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Merge WF03 Technical Failure Context": {
+      "main": [
+        [
+          {
+            "node": "Route Technical Failure Completion Mode",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Route Technical Failure Completion Mode": {
+      "main": [
+        [
+          {
+            "node": "Show Technical Failure",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Build WF03 Recovery Completion",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Show Technical Failure",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": true,
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate",
+    "availableInMCP": false,
+    "timeSavedMode": "fixed",
+    "errorWorkflow": "WykBM7mvCOqph91a",
+    "callerPolicy": "workflowsFromSameOwner"
+  },
+  "versionId": "af686d32-425c-4289-af0a-36d439044ef5",
+  "meta": {
+    "templateCredsSetupCompleted": true,
+    "instanceId": "72249f432a77256c34affd74b688f3209ef91628f0f09e01d73ae5bb45f3c5f3"
+  },
+  "nodeGroups": [],
+  "id": "CVHTFKM97aBHhmXf",
+  "tags": []
+}
