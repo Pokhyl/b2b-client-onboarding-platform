@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Add a single explicit return boundary to WF02.
+"""Add or repair the single explicit WF02 return boundary.
 
 The script is idempotent and fails closed when the workflow shape differs from
 what the current implementation expects.
@@ -24,15 +24,7 @@ TERMINAL_RESULT_NODES = [
     "Return Terminal Delivery Result",
 ]
 
-RETURN_CODE = """const items = $input.all();
-
-if (items.length !== 1) {
-  throw new Error(
-    `WF02 return boundary expected exactly one item, received ${items.length}`,
-  );
-}
-
-const input = items[0].json ?? {};
+RETURN_CODE = """const input = $json ?? {};
 
 if (input.workflow !== 'WF02') {
   throw new Error(
@@ -64,40 +56,40 @@ def main() -> None:
     connections = workflow.setdefault("connections", {})
 
     node_by_name = {node.get("name"): node for node in nodes}
-
-    if RETURN_NODE_NAME in node_by_name:
-        print(f"Already present: {RETURN_NODE_NAME}")
-        return
-
     missing = [name for name in TERMINAL_RESULT_NODES if name not in node_by_name]
+
     if missing:
         raise SystemExit("Missing terminal nodes: " + ", ".join(missing))
 
-    for node_name in TERMINAL_RESULT_NODES:
-        node_connections = connections.get(node_name, {})
-        for connection_type, branches in node_connections.items():
-            if any(branch for branch in branches):
-                raise SystemExit(
-                    f"{node_name} already has an outgoing {connection_type} connection"
-                )
+    return_node = node_by_name.get(RETURN_NODE_NAME)
 
-    positions = [node_by_name[name].get("position", [0, 0]) for name in TERMINAL_RESULT_NODES]
-    return_x = max(position[0] for position in positions) + 400
-    return_y = round(sum(position[1] for position in positions) / len(positions))
+    if return_node is None:
+        positions = [
+            node_by_name[name].get("position", [0, 0])
+            for name in TERMINAL_RESULT_NODES
+        ]
+        return_x = max(position[0] for position in positions) + 400
+        return_y = round(
+            sum(position[1] for position in positions) / len(positions)
+        )
 
-    nodes.append(
-        {
-            "parameters": {
-                "mode": "runOnceForEachItem",
-                "jsCode": RETURN_CODE,
-            },
+        return_node = {
+            "parameters": {},
             "type": "n8n-nodes-base.code",
             "typeVersion": 2,
             "position": [return_x, return_y],
             "id": RETURN_NODE_ID,
             "name": RETURN_NODE_NAME,
         }
-    )
+        nodes.append(return_node)
+        action = "Added"
+    else:
+        action = "Repaired"
+
+    return_node["parameters"] = {
+        "mode": "runOnceForEachItem",
+        "jsCode": RETURN_CODE,
+    }
 
     for node_name in TERMINAL_RESULT_NODES:
         connections[node_name] = {
@@ -118,7 +110,7 @@ def main() -> None:
     )
 
     print(f"Updated: {WORKFLOW_PATH}")
-    print(f"Added: {RETURN_NODE_NAME}")
+    print(f"{action}: {RETURN_NODE_NAME}")
     print(f"Connected terminal nodes: {len(TERMINAL_RESULT_NODES)}")
 
 
