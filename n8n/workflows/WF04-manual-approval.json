@@ -1,5 +1,5 @@
 {
-  "updatedAt": "2026-07-26T19:29:56.499Z",
+  "updatedAt": "2026-07-26T19:34:40.473Z",
   "createdAt": "2026-07-19T17:57:15.410Z",
   "id": "I6nqXCOFa3qycHtY",
   "name": "WF04 - Manual Approval",
@@ -274,6 +274,11 @@
           }
         },
         "options": {
+          "limitWaitTime": {
+            "values": {
+              "resumeAmount": 168
+            }
+          },
           "appendAttribution": false
         }
       },
@@ -763,9 +768,9 @@
   },
   "nodeGroups": [],
   "pinData": {},
-  "versionId": "652ae21e-ae36-4557-95b4-22f00bfb343b",
+  "versionId": "ad02f606-dd59-443a-8863-c1872810285b",
   "activeVersionId": "e43638c6-18ba-41fc-b8a8-5e2ceaf213fe",
-  "versionCounter": 142,
+  "versionCounter": 145,
   "triggerCount": 1,
   "sourceWorkflowId": null,
   "tags": [],
