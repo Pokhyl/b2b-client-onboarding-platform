@@ -1,0 +1,99 @@
+{
+  "updatedAt": "2026-07-21T18:56:03.574Z",
+  "createdAt": "2026-07-19T17:57:15.410Z",
+  "id": "I6nqXCOFa3qycHtY",
+  "name": "WF04 - Manual Approval",
+  "description": null,
+  "active": true,
+  "isArchived": false,
+  "nodes": [
+    {
+      "parameters": {
+        "inputSource": "passthrough"
+      },
+      "type": "n8n-nodes-base.executeWorkflowTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        -1952,
+        -64
+      ],
+      "id": "11ad755c-0cdc-4a61-af33-250fc201f9ef",
+      "name": "Internal Invocation Trigger"
+    },
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "internal/wf04-retry-dispatch",
+        "authentication": "headerAuth",
+        "options": {
+          "responseCode": {
+            "values": {}
+          }
+        }
+      },
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2.1,
+      "position": [
+        -1952,
+        -256
+      ],
+      "id": "892d89d6-88bf-4755-b692-c7f0ad4c0626",
+      "name": "Webhook",
+      "webhookId": "5f96b7e9-757d-4421-9b9e-5f3d2ebffd70",
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "vRGUhlaMi4SARvdN",
+          "name": "Header Auth account"
+        }
+      }
+    }
+  ],
+  "connections": {
+    "Internal Invocation Trigger": {
+      "main": [
+        []
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate",
+    "availableInMCP": false
+  },
+  "staticData": null,
+  "meta": {
+    "templateCredsSetupCompleted": true
+  },
+  "nodeGroups": [],
+  "pinData": {},
+  "versionId": "97d1d75d-e727-4cf3-a412-34ebc1caacf2",
+  "activeVersionId": "97d1d75d-e727-4cf3-a412-34ebc1caacf2",
+  "versionCounter": 17,
+  "triggerCount": 1,
+  "sourceWorkflowId": null,
+  "tags": [],
+  "shared": [
+    {
+      "updatedAt": "2026-07-19T17:57:15.410Z",
+      "createdAt": "2026-07-19T17:57:15.410Z",
+      "role": "workflow:owner",
+      "workflowId": "I6nqXCOFa3qycHtY",
+      "projectId": "zmxxmv9P8lYEvh92",
+      "project": {
+        "updatedAt": "2026-07-18T09:30:21.224Z",
+        "createdAt": "2026-07-18T09:24:05.682Z",
+        "id": "zmxxmv9P8lYEvh92",
+        "name": "Vitalii Pokhyl <pokhylvitalii@gmail.com>",
+        "type": "personal",
+        "icon": null,
+        "description": null,
+        "customTelemetryTags": [],
+        "creatorId": "9bff2e70-7eea-4940-a9da-d5dfd1c2d055"
+      }
+    }
+  ],
+  "versionMetadata": {
+    "name": "Version 97d1d75d",
+    "description": ""
+  }
+}
