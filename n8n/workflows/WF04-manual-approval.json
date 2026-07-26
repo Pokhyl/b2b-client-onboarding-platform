@@ -1,5 +1,5 @@
 {
-  "updatedAt": "2026-07-26T19:14:03.057Z",
+  "updatedAt": "2026-07-26T19:29:56.499Z",
   "createdAt": "2026-07-19T17:57:15.410Z",
   "id": "I6nqXCOFa3qycHtY",
   "name": "WF04 - Manual Approval",
@@ -94,7 +94,7 @@
         "operation": "executeQuery",
         "query": "WITH prepared AS (\n    SELECT *\n    FROM prepare_wf04_approval_request(\n        $1::uuid,\n        $2::uuid,\n        $3::text,\n        $4::uuid,\n        $5::uuid,\n        $6::uuid,\n        $7::text,\n        $8::text,\n        $9::text,\n        $10::text,\n        $11::text,\n        $12::integer,\n        $13::integer,\n        $14::integer\n    )\n)\nSELECT\n    $15::jsonb AS input_context,\n    prepared.*\nFROM prepared;",
         "options": {
-          "queryReplacement": "[   $json.case_id,   $json.correlation_id,   $json.trigger_source,   $json.accepted_submission_id,   $json.client_id,   $json.external_operation_id,   $json.recovery_reason,   $json.waiting_execution_id,   $json.recipient_email,   $json.template_key,   $json.message_marker,   $json.response_timeout_hours,   $json.lease_seconds,   $json.max_attempts,    JSON.stringify({     case_id: $json.case_id,     correlation_id: $json.correlation_id,     trigger_source: $json.trigger_source,     accepted_submission_id:       $json.accepted_submission_id,     client_id: $json.client_id,     external_operation_id:       $json.external_operation_id,     recovery_reason:       $json.recovery_reason,     waiting_execution_id:       $json.waiting_execution_id,     recipient_email:       $json.recipient_email,     template_key:       $json.template_key,     message_marker:       $json.message_marker,     response_timeout_hours:       $json.response_timeout_hours,     lease_seconds:       $json.lease_seconds,     max_attempts:       $json.max_attempts,     sender_name:       $json.sender_name,     support_contact:       $json.support_contact   }) ]"
+          "queryReplacement": "={{\n[\n  $json.case_id,\n  $json.correlation_id,\n  $json.trigger_source,\n  $json.accepted_submission_id,\n  $json.client_id,\n  $json.external_operation_id,\n  $json.recovery_reason,\n  $json.waiting_execution_id,\n  $json.recipient_email,\n  $json.template_key,\n  $json.message_marker,\n  $json.response_timeout_hours,\n  $json.lease_seconds,\n  $json.max_attempts,\n  JSON.stringify({\n    case_id: $json.case_id,\n    correlation_id: $json.correlation_id,\n    trigger_source: $json.trigger_source,\n    accepted_submission_id: $json.accepted_submission_id,\n    client_id: $json.client_id,\n    external_operation_id: $json.external_operation_id,\n    recovery_reason: $json.recovery_reason,\n    waiting_execution_id: $json.waiting_execution_id,\n    recipient_email: $json.recipient_email,\n    template_key: $json.template_key,\n    message_marker: $json.message_marker,\n    response_timeout_hours: $json.response_timeout_hours,\n    lease_seconds: $json.lease_seconds,\n    max_attempts: $json.max_attempts,\n    sender_name: $json.sender_name,\n    support_contact: $json.support_contact\n  })\n]\n}}"
         }
       },
       "type": "n8n-nodes-base.postgres",
@@ -763,9 +763,9 @@
   },
   "nodeGroups": [],
   "pinData": {},
-  "versionId": "c20dd074-c344-450d-8342-09172e8e3d4e",
+  "versionId": "652ae21e-ae36-4557-95b4-22f00bfb343b",
   "activeVersionId": "e43638c6-18ba-41fc-b8a8-5e2ceaf213fe",
-  "versionCounter": 140,
+  "versionCounter": 142,
   "triggerCount": 1,
   "sourceWorkflowId": null,
   "tags": [],
