@@ -1,1 +1,960 @@
-{"name":"WF98 - Retry Dispatcher","nodes":[{"parameters":{"rule":{"interval":[{"field":"minutes","minutesInterval":1}]}},"type":"n8n-nodes-base.scheduleTrigger","typeVersion":1.3,"position":[-800,-48],"id":"00282f7f-4163-4511-9412-268565ebdaae","name":"Schedule Trigger"},{"parameters":{"jsCode":"// WF98 validates protected runtime configuration before querying PostgreSQL.\n\nfunction readBoundedInteger(name, fallback) {\n  const rawValue = $env[name];\n\n  const value =\n    rawValue === null ||\n    rawValue === undefined ||\n    String(rawValue).trim() === ''\n      ? fallback\n      : Number(rawValue);\n\n  if (\n    !Number.isInteger(value) ||\n    value < 1 ||\n    value > 200\n  ) {\n    throw new Error(\n      `${name} must be an integer between 1 and 200`,\n    );\n  }\n\n  return value;\n}\n\nconst batchSize = readBoundedInteger(\n  'WF98_BATCH_SIZE',\n  50,\n);\n\nconst maxDispatchesPerRun = readBoundedInteger(\n  'WF98_MAX_DISPATCHES_PER_RUN',\n  50,\n);\n\nconst waitForCompletion = String(\n  $env.WF98_DESTINATION_WAIT_FOR_COMPLETION ??\n    'false',\n)\n  .trim()\n  .toLowerCase();\n\nif (waitForCompletion !== 'false') {\n  throw new Error(\n    'WF98_DESTINATION_WAIT_FOR_COMPLETION must be false',\n  );\n}\n\nreturn [\n  {\n    json: {\n      workflow_name: 'WF98 — Retry Dispatcher',\n      started_at: new Date().toISOString(),\n\n      batch_size: batchSize,\n\n      max_dispatches_per_run:\n        maxDispatchesPerRun,\n\n      operation_candidate_limit: Math.min(\n        batchSize,\n        maxDispatchesPerRun,\n      ),\n\n      destination_wait_for_completion: false,\n    },\n  },\n];"},"type":"n8n-nodes-base.code","typeVersion":2,"position":[-576,-48],"id":"547b9d52-bd7e-4db6-bba9-87e89a5957b6","name":"Validate WF98 Configuration"},{"parameters":{"operation":"executeQuery","query":"WITH latest_submission AS (\n  SELECT DISTINCT ON (submission.case_id)\n    submission.case_id,\n    submission.id,\n    submission.form_token_id,\n    submission.submission_sequence,\n    submission.validation_status\n  FROM onboarding_submissions AS submission\n  ORDER BY\n    submission.case_id,\n    submission.submission_sequence DESC,\n    submission.id DESC\n),\n\npending_submission_counts AS (\n  SELECT\n    submission.case_id,\n    count(*) FILTER (\n      WHERE submission.validation_status = 'pending'\n    ) AS pending_count\n  FROM onboarding_submissions AS submission\n  GROUP BY submission.case_id\n),\n\nfinalizing_snapshot AS (\n  SELECT\n    onboarding_case.id AS case_id,\n    onboarding_case.correlation_id,\n    onboarding_case.state AS case_state,\n    onboarding_case.updated_at,\n\n    drive_operation.id AS drive_operation_id,\n    drive_operation.status AS drive_operation_status,\n    drive_operation.external_id AS drive_external_id,\n    drive_step.status AS drive_step_status,\n\n    kickoff_operation.id AS kickoff_operation_id,\n    kickoff_operation.status AS kickoff_operation_status,\n    kickoff_operation.external_id AS kickoff_external_id,\n    kickoff_step.status AS kickoff_step_status,\n\n    team_operation.id AS team_operation_id,\n    team_operation.status AS team_operation_status,\n    team_operation.external_id AS team_external_id,\n    team_step.status AS team_step_status\n\n  FROM onboarding_cases AS onboarding_case\n\n  LEFT JOIN onboarding_steps AS drive_step\n    ON drive_step.case_id = onboarding_case.id\n   AND drive_step.step_type = 'create_drive_folder'\n\n  LEFT JOIN onboarding_steps AS kickoff_step\n    ON kickoff_step.case_id = onboarding_case.id\n   AND kickoff_step.step_type = 'create_kickoff_event'\n\n  LEFT JOIN onboarding_steps AS team_step\n    ON team_step.case_id = onboarding_case.id\n   AND team_step.step_type = 'notify_team'\n\n  LEFT JOIN LATERAL (\n    SELECT operation.*\n    FROM external_operations AS operation\n    WHERE operation.case_id = onboarding_case.id\n      AND operation.operation_type = 'create_drive_folder'\n    ORDER BY\n      operation.created_at DESC,\n      operation.id DESC\n    LIMIT 1\n  ) AS drive_operation ON true\n\n  LEFT JOIN LATERAL (\n    SELECT operation.*\n    FROM external_operations AS operation\n    WHERE operation.case_id = onboarding_case.id\n      AND operation.operation_type = 'create_kickoff_event'\n    ORDER BY\n      operation.created_at DESC,\n      operation.id DESC\n    LIMIT 1\n  ) AS kickoff_operation ON true\n\n  LEFT JOIN LATERAL (\n    SELECT operation.*\n    FROM external_operations AS operation\n    WHERE operation.case_id = onboarding_case.id\n      AND operation.operation_type = 'notify_team'\n    ORDER BY\n      operation.created_at DESC,\n      operation.id DESC\n    LIMIT 1\n  ) AS team_operation ON true\n\n  WHERE onboarding_case.state = 'finalizing'\n),\n\noperation_candidates AS (\n  SELECT\n    'external_operation'::text AS candidate_source,\n\n    CASE\n      WHEN operation.status = 'in_progress'\n        THEN 1\n      WHEN operation.status = 'failed_retryable'\n        THEN 2\n    END AS candidate_priority,\n\n    CASE\n      WHEN operation.status = 'in_progress'\n        THEN 'expired_lease'\n      WHEN operation.status = 'failed_retryable'\n        THEN 'due_retry'\n    END AS candidate_class,\n\n    operation.id AS external_operation_id,\n    operation.operation_type,\n    operation.status AS operation_status,\n\n    operation.case_id,\n    onboarding_case.correlation_id,\n    onboarding_case.state AS case_state,\n\n    CASE\n      WHEN operation.operation_type = 'send_client_data_request'\n        THEN 'WF02'\n      WHEN operation.operation_type = 'send_approval_request'\n        THEN 'WF04'\n      WHEN operation.operation_type = 'provision_client'\n        THEN 'WF05'\n      WHEN operation.operation_type IN (\n        'create_drive_folder',\n        'create_kickoff_event',\n        'notify_team'\n      )\n        THEN 'WF06'\n      WHEN operation.operation_type = 'notify_operator_intervention'\n        THEN 'WF99'\n      ELSE NULL\n    END AS destination_workflow,\n\n    NULL::text AS recovery_reason,\n    NULL::uuid AS submission_id,\n    NULL::uuid AS failed_submission_id,\n    NULL::text AS request_cycle_key,\n\n    CASE\n      WHEN operation.status = 'in_progress'\n        THEN operation.lease_expires_at\n      ELSE operation.next_retry_at\n    END AS sort_at,\n\n    operation.id::text AS candidate_id\n\n  FROM external_operations AS operation\n\n  LEFT JOIN onboarding_cases AS onboarding_case\n    ON onboarding_case.id = operation.case_id\n\n  WHERE (\n    operation.status = 'in_progress'\n    AND operation.lease_expires_at IS NOT NULL\n    AND operation.lease_expires_at <= clock_timestamp()\n  )\n  OR (\n    operation.status = 'failed_retryable'\n    AND operation.next_retry_at IS NOT NULL\n    AND operation.next_retry_at <= clock_timestamp()\n    AND operation.attempt_count < operation.max_attempts\n  )\n),\n\nstate_gap_candidates AS (\n  /*\n   * Priority 3:\n   * submission validation did not continue after token consumption.\n   */\n  SELECT\n    'state_gap'::text AS candidate_source,\n    3 AS candidate_priority,\n    'pending_submission_validation'::text AS candidate_class,\n\n    NULL::uuid AS external_operation_id,\n    NULL::text AS operation_type,\n    NULL::text AS operation_status,\n\n    onboarding_case.id AS case_id,\n    onboarding_case.correlation_id,\n    onboarding_case.state AS case_state,\n\n    'WF03'::text AS destination_workflow,\n    'pending_submission_validation'::text AS recovery_reason,\n\n    latest_submission.id AS submission_id,\n    NULL::uuid AS failed_submission_id,\n    NULL::text AS request_cycle_key,\n\n    onboarding_case.updated_at AS sort_at,\n    (\n      onboarding_case.id::text ||\n      ':pending_submission_validation'\n    ) AS candidate_id\n\n  FROM onboarding_cases AS onboarding_case\n\n  JOIN latest_submission\n    ON latest_submission.case_id = onboarding_case.id\n\n  JOIN pending_submission_counts\n    ON pending_submission_counts.case_id = onboarding_case.id\n\n  JOIN onboarding_form_tokens AS form_token\n    ON form_token.id = latest_submission.form_token_id\n   AND form_token.case_id = onboarding_case.id\n\n  WHERE onboarding_case.state = 'data_received'\n    AND pending_submission_counts.pending_count = 1\n    AND latest_submission.validation_status = 'pending'\n    AND form_token.status = 'consumed'\n\n  UNION ALL\n\n  /*\n   * Priority 4:\n   * created case exists, but WF02 initial dispatch is missing.\n   */\n  SELECT\n    'state_gap',\n    4,\n    'missing_initial_client_data_dispatch',\n\n    NULL::uuid,\n    NULL::text,\n    NULL::text,\n\n    onboarding_case.id,\n    onboarding_case.correlation_id,\n    onboarding_case.state,\n\n    'WF02',\n    'missing_initial_dispatch',\n\n    NULL::uuid,\n    NULL::uuid,\n    'initial',\n\n    onboarding_case.updated_at,\n    (\n      onboarding_case.id::text ||\n      ':missing_initial_client_data_dispatch'\n    )\n\n  FROM onboarding_cases AS onboarding_case\n\n  WHERE onboarding_case.state = 'created'\n    AND NOT EXISTS (\n      SELECT 1\n      FROM external_operations AS operation\n      WHERE operation.case_id = onboarding_case.id\n        AND operation.operation_type =\n          'send_client_data_request'\n        AND operation.status <> 'pending'\n    )\n\n  UNION ALL\n\n  /*\n   * Priority 4:\n   * validation failure exists, but correction dispatch is missing.\n   */\n  SELECT\n    'state_gap',\n    4,\n    'missing_correction_dispatch',\n\n    NULL::uuid,\n    NULL::text,\n    NULL::text,\n\n    onboarding_case.id,\n    onboarding_case.correlation_id,\n    onboarding_case.state,\n\n    'WF02',\n    'missing_correction_dispatch',\n\n    NULL::uuid,\n    latest_submission.id,\n    (\n      'validation_failed:' ||\n      latest_submission.id::text\n    ),\n\n    onboarding_case.updated_at,\n    (\n      onboarding_case.id::text ||\n      ':missing_correction_dispatch'\n    )\n\n  FROM onboarding_cases AS onboarding_case\n\n  JOIN latest_submission\n    ON latest_submission.case_id = onboarding_case.id\n\n  WHERE onboarding_case.state = 'validation_failed'\n    AND latest_submission.validation_status = 'failed'\n    AND NOT EXISTS (\n      SELECT 1\n      FROM external_operations AS operation\n      WHERE operation.case_id = onboarding_case.id\n        AND operation.operation_type =\n          'send_client_data_request'\n        AND operation.request_summary ->>\n          'request_cycle_key' =\n            (\n              'validation_failed:' ||\n              latest_submission.id::text\n            )\n        AND operation.status <> 'pending'\n    )\n\n  UNION ALL\n\n  /*\n   * Priority 4:\n   * awaiting_approval exists, but WF04 dispatch is missing.\n   */\n  SELECT\n    'state_gap',\n    4,\n    'missing_approval_dispatch',\n\n    NULL::uuid,\n    NULL::text,\n    NULL::text,\n\n    onboarding_case.id,\n    onboarding_case.correlation_id,\n    onboarding_case.state,\n\n    'WF04',\n    'missing_initial_dispatch',\n\n    NULL::uuid,\n    NULL::uuid,\n    NULL::text,\n\n    onboarding_case.updated_at,\n    (\n      onboarding_case.id::text ||\n      ':missing_approval_dispatch'\n    )\n\n  FROM onboarding_cases AS onboarding_case\n\n  JOIN onboarding_steps AS approval_step\n    ON approval_step.case_id = onboarding_case.id\n   AND approval_step.step_type = 'manual_approval'\n\n  WHERE onboarding_case.state = 'awaiting_approval'\n    AND onboarding_case.client_id IS NOT NULL\n    AND onboarding_case.accepted_submission_id IS NOT NULL\n    AND onboarding_case.approval_decision IS NULL\n    AND approval_step.status IN (\n      'pending',\n      'failed_retryable'\n    )\n    AND NOT EXISTS (\n      SELECT 1\n      FROM external_operations AS operation\n      WHERE operation.case_id = onboarding_case.id\n        AND operation.operation_type =\n          'send_approval_request'\n        AND operation.status <> 'pending'\n    )\n\n  UNION ALL\n\n  /*\n   * Priority 4:\n   * approval succeeded, but WF05 dispatch is missing.\n   */\n  SELECT\n    'state_gap',\n    4,\n    'missing_provisioning_dispatch',\n\n    NULL::uuid,\n    NULL::text,\n    NULL::text,\n\n    onboarding_case.id,\n    onboarding_case.correlation_id,\n    onboarding_case.state,\n\n    'WF05',\n    'missing_initial_dispatch',\n\n    NULL::uuid,\n    NULL::uuid,\n    NULL::text,\n\n    onboarding_case.updated_at,\n    (\n      onboarding_case.id::text ||\n      ':missing_provisioning_dispatch'\n    )\n\n  FROM onboarding_cases AS onboarding_case\n\n  JOIN onboarding_steps AS approval_step\n    ON approval_step.case_id = onboarding_case.id\n   AND approval_step.step_type = 'manual_approval'\n\n  JOIN onboarding_steps AS provision_step\n    ON provision_step.case_id = onboarding_case.id\n   AND provision_step.step_type = 'provision_client'\n\n  WHERE onboarding_case.state = 'approved'\n    AND onboarding_case.approval_decision = 'approved'\n    AND onboarding_case.approval_decided_at IS NOT NULL\n    AND onboarding_case.external_client_id IS NULL\n    AND approval_step.status = 'completed'\n    AND approval_step.approval_decision = 'approved'\n    AND provision_step.status IN (\n      'pending',\n      'failed_retryable'\n    )\n    AND NOT EXISTS (\n      SELECT 1\n      FROM external_operations AS operation\n      WHERE operation.case_id = onboarding_case.id\n        AND operation.operation_type = 'provision_client'\n        AND operation.status <> 'pending'\n    )\n\n  UNION ALL\n\n  /*\n   * Priority 4:\n   * provisioning succeeded, but WF06 dispatch is missing.\n   */\n  SELECT\n    'state_gap',\n    4,\n    'missing_finalization_dispatch',\n\n    NULL::uuid,\n    NULL::text,\n    NULL::text,\n\n    onboarding_case.id,\n    onboarding_case.correlation_id,\n    onboarding_case.state,\n\n    'WF06',\n    'missing_initial_dispatch',\n\n    NULL::uuid,\n    NULL::uuid,\n    NULL::text,\n\n    onboarding_case.updated_at,\n    (\n      onboarding_case.id::text ||\n      ':missing_finalization_dispatch'\n    )\n\n  FROM onboarding_cases AS onboarding_case\n\n  JOIN onboarding_steps AS drive_step\n    ON drive_step.case_id = onboarding_case.id\n   AND drive_step.step_type = 'create_drive_folder'\n\n  JOIN onboarding_steps AS kickoff_step\n    ON kickoff_step.case_id = onboarding_case.id\n   AND kickoff_step.step_type = 'create_kickoff_event'\n\n  JOIN onboarding_steps AS team_step\n    ON team_step.case_id = onboarding_case.id\n   AND team_step.step_type = 'notify_team'\n\n  WHERE onboarding_case.state = 'provisioned'\n    AND onboarding_case.external_client_id IS NOT NULL\n    AND btrim(onboarding_case.external_client_id) <> ''\n    AND drive_step.status = 'pending'\n    AND kickoff_step.status = 'pending'\n    AND team_step.status = 'pending'\n    AND NOT EXISTS (\n      SELECT 1\n      FROM external_operations AS operation\n      WHERE operation.case_id = onboarding_case.id\n        AND operation.operation_type IN (\n          'create_drive_folder',\n          'create_kickoff_event',\n          'notify_team'\n        )\n        AND operation.status <> 'pending'\n    )\n\n  UNION ALL\n\n  /*\n   * Priority 5:\n   * finalization must resume from the earliest incomplete operation.\n   */\n  SELECT\n    'state_gap',\n    5,\n    'resume_finalization',\n\n    NULL::uuid,\n    NULL::text,\n    NULL::text,\n\n    snapshot.case_id,\n    snapshot.correlation_id,\n    snapshot.case_state,\n\n    'WF06',\n    'resume_finalization',\n\n    NULL::uuid,\n    NULL::uuid,\n    NULL::text,\n\n    snapshot.updated_at,\n    (\n      snapshot.case_id::text ||\n      ':resume_finalization'\n    )\n\n  FROM finalizing_snapshot AS snapshot\n\n  WHERE (\n    (\n      (\n        snapshot.drive_operation_id IS NULL\n        OR snapshot.drive_operation_status = 'pending'\n      )\n      AND snapshot.drive_step_status = 'pending'\n    )\n    OR (\n      snapshot.drive_operation_status = 'succeeded'\n      AND snapshot.drive_external_id IS NOT NULL\n      AND btrim(snapshot.drive_external_id) <> ''\n      AND snapshot.drive_step_status = 'completed'\n      AND (\n        snapshot.kickoff_operation_id IS NULL\n        OR snapshot.kickoff_operation_status = 'pending'\n      )\n      AND snapshot.kickoff_step_status = 'pending'\n    )\n    OR (\n      snapshot.drive_operation_status = 'succeeded'\n      AND snapshot.drive_external_id IS NOT NULL\n      AND btrim(snapshot.drive_external_id) <> ''\n      AND snapshot.drive_step_status = 'completed'\n      AND snapshot.kickoff_operation_status = 'succeeded'\n      AND snapshot.kickoff_external_id IS NOT NULL\n      AND btrim(snapshot.kickoff_external_id) <> ''\n      AND snapshot.kickoff_step_status = 'completed'\n      AND (\n        snapshot.team_operation_id IS NULL\n        OR snapshot.team_operation_status = 'pending'\n      )\n      AND snapshot.team_step_status = 'pending'\n    )\n  )\n\n  UNION ALL\n\n  /*\n   * Priority 6:\n   * all external operations succeeded, but case completion is missing.\n   */\n  SELECT\n    'state_gap',\n    6,\n    'complete_finalization',\n\n    NULL::uuid,\n    NULL::text,\n    NULL::text,\n\n    snapshot.case_id,\n    snapshot.correlation_id,\n    snapshot.case_state,\n\n    'WF06',\n    'complete_finalization',\n\n    NULL::uuid,\n    NULL::uuid,\n    NULL::text,\n\n    snapshot.updated_at,\n    (\n      snapshot.case_id::text ||\n      ':complete_finalization'\n    )\n\n  FROM finalizing_snapshot AS snapshot\n\n  WHERE snapshot.drive_operation_status = 'succeeded'\n    AND snapshot.drive_external_id IS NOT NULL\n    AND btrim(snapshot.drive_external_id) <> ''\n    AND snapshot.drive_step_status = 'completed'\n\n    AND snapshot.kickoff_operation_status = 'succeeded'\n    AND snapshot.kickoff_external_id IS NOT NULL\n    AND btrim(snapshot.kickoff_external_id) <> ''\n    AND snapshot.kickoff_step_status = 'completed'\n\n    AND snapshot.team_operation_status = 'succeeded'\n    AND snapshot.team_external_id IS NOT NULL\n    AND btrim(snapshot.team_external_id) <> ''\n    AND snapshot.team_step_status = 'completed'\n),\n\nall_candidates AS (\n  SELECT *\n  FROM operation_candidates\n\n  UNION ALL\n\n  SELECT *\n  FROM state_gap_candidates\n)\n\nSELECT\n  candidate_source,\n  candidate_priority,\n  candidate_class,\n\n  external_operation_id,\n  operation_type,\n  operation_status,\n\n  case_id,\n  correlation_id,\n  case_state,\n\n  destination_workflow,\n  recovery_reason,\n\n  submission_id,\n  failed_submission_id,\n  request_cycle_key\n\nFROM all_candidates\n\nORDER BY\n  candidate_priority ASC,\n  sort_at ASC,\n  candidate_id ASC\n\nLIMIT $1::integer;","options":{"queryReplacement":"={{ $json.operation_candidate_limit }}"}},"type":"n8n-nodes-base.postgres","typeVersion":2.6,"position":[-368,-48],"id":"469a1a61-944f-4d28-8c69-f61c58f49b02","name":"Select WF98 Candidates","alwaysOutputData":true,"credentials":{"postgres":{"id":"zU4wPvkQFRBSwH0b","name":"B2B Onboarding App DB"}}},{"parameters":{"conditions":{"options":{"caseSensitive":true,"leftValue":"","typeValidation":"strict","version":3},"conditions":[{"id":"37177ef0-810e-4223-b057-395c4c33ebd1","leftValue":"={{ Boolean($json.candidate_source) }}","rightValue":"","operator":{"type":"boolean","operation":"true","singleValue":true}}],"combinator":"and"},"options":{}},"type":"n8n-nodes-base.if","typeVersion":2.3,"position":[-160,-48],"id":"9b041bc6-a8e5-4bb4-b536-57a156e461e6","name":"Candidates Found?"},{"parameters":{"mode":"runOnceForEachItem","jsCode":"// Validate one WF98 candidate and build a minimal safe dispatch payload.\n\nconst candidate = $json;\n\nconst UUID_PATTERN =\n  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;\n\nfunction isUuid(value) {\n  return (\n    typeof value === 'string' &&\n    UUID_PATTERN.test(value)\n  );\n}\n\nfunction requireUuid(value, fieldName) {\n  if (!isUuid(value)) {\n    return {\n      valid: false,\n      errorCode: `invalid_${fieldName}`,\n    };\n  }\n\n  return {\n    valid: true,\n  };\n}\n\nfunction safeText(value, maxLength = 200) {\n  if (\n    value === null ||\n    value === undefined\n  ) {\n    return null;\n  }\n\n  if (\n    typeof value !== 'string' &&\n    typeof value !== 'number' &&\n    typeof value !== 'boolean'\n  ) {\n    return null;\n  }\n\n  const normalized = String(value).trim();\n\n  if (!normalized) {\n    return null;\n  }\n\n  return normalized.slice(0, maxLength);\n}\n\nfunction integrityFailure(errorCode) {\n  return {\n    json: {\n      dispatch_kind: 'integrity_failure',\n      dispatch_status: 'ready',\n      integrity_failure: true,\n\n      destination_workflow: 'WF99',\n\n      candidate_source: safeText(\n        candidate.candidate_source,\n        100,\n      ),\n\n      candidate_class: safeText(\n        candidate.candidate_class,\n        100,\n      ),\n\n      external_operation_id: isUuid(\n        candidate.external_operation_id,\n      )\n        ? candidate.external_operation_id\n        : null,\n\n      operation_type: safeText(\n        candidate.operation_type,\n        100,\n      ),\n\n      case_id: isUuid(candidate.case_id)\n        ? candidate.case_id\n        : null,\n\n      correlation_id: isUuid(\n        candidate.correlation_id,\n      )\n        ? candidate.correlation_id\n        : null,\n\n      payload: {\n        source_variant: 'explicit_internal',\n\n        source_workflow_name:\n          'WF98 — Retry Dispatcher',\n\n        source_workflow_id: safeText(\n          $workflow.id,\n          120,\n        ),\n\n        source_execution_id: safeText(\n          $execution.id,\n          120,\n        ),\n\n        case_id: isUuid(candidate.case_id)\n          ? candidate.case_id\n          : null,\n\n        correlation_id: isUuid(\n          candidate.correlation_id,\n        )\n          ? candidate.correlation_id\n          : null,\n\n        step_id: isUuid(candidate.step_id)\n          ? candidate.step_id\n          : null,\n\n        submission_id: isUuid(\n          candidate.submission_id,\n        )\n          ? candidate.submission_id\n          : null,\n\n        external_operation_id: isUuid(\n          candidate.external_operation_id,\n        )\n          ? candidate.external_operation_id\n          : null,\n\n        error_class:\n          'wf98_candidate_integrity_error',\n\n        error_code: errorCode,\n\n        error_message:\n          `WF98 rejected a malformed or unsupported retry candidate: ${errorCode}`,\n\n        retryable: false,\n        severity: 'critical',\n        requires_intervention: true,\n\n        error_details: {\n          candidate_source: safeText(\n            candidate.candidate_source,\n            100,\n          ),\n\n          candidate_class: safeText(\n            candidate.candidate_class,\n            100,\n          ),\n\n          operation_type: safeText(\n            candidate.operation_type,\n            100,\n          ),\n\n          destination_workflow: safeText(\n            candidate.destination_workflow,\n            100,\n          ),\n        },\n      },\n    },\n  };\n}\n\nconst operationDestinations = {\n  send_client_data_request: 'WF02',\n  send_approval_request: 'WF04',\n  provision_client: 'WF05',\n  create_drive_folder: 'WF06',\n  create_kickoff_event: 'WF06',\n  notify_team: 'WF06',\n  notify_operator_intervention: 'WF99',\n};\n\nif (\n  candidate.candidate_source ===\n  'external_operation'\n) {\n  const operationIdCheck = requireUuid(\n    candidate.external_operation_id,\n    'external_operation_id',\n  );\n\n  if (!operationIdCheck.valid) {\n    return integrityFailure(\n      operationIdCheck.errorCode,\n    );\n  }\n\n  const expectedDestination =\n    operationDestinations[\n      candidate.operation_type\n    ];\n\n  if (!expectedDestination) {\n    return integrityFailure(\n      'unknown_operation_type',\n    );\n  }\n\n  if (\n    candidate.destination_workflow !==\n    expectedDestination\n  ) {\n    return integrityFailure(\n      'destination_mapping_mismatch',\n    );\n  }\n\n  if (\n    candidate.operation_type ===\n    'notify_operator_intervention'\n  ) {\n    return {\n      json: {\n        dispatch_kind: 'operation_retry',\n        dispatch_status: 'ready',\n        integrity_failure: false,\n\n        destination_workflow: 'WF99',\n\n        candidate_source:\n          candidate.candidate_source,\n\n        candidate_class:\n          candidate.candidate_class,\n\n        external_operation_id:\n          candidate.external_operation_id,\n\n        operation_type:\n          candidate.operation_type,\n\n        case_id:\n          candidate.case_id ?? null,\n\n        correlation_id:\n          candidate.correlation_id ?? null,\n\n        payload: {\n          source_variant:\n            'notification_retry',\n\n          trigger_source: 'wf98',\n\n          external_operation_id:\n            candidate.external_operation_id,\n        },\n      },\n    };\n  }\n\n  const caseIdCheck = requireUuid(\n    candidate.case_id,\n    'case_id',\n  );\n\n  if (!caseIdCheck.valid) {\n    return integrityFailure(\n      caseIdCheck.errorCode,\n    );\n  }\n\n  const correlationIdCheck = requireUuid(\n    candidate.correlation_id,\n    'correlation_id',\n  );\n\n  if (!correlationIdCheck.valid) {\n    return integrityFailure(\n      correlationIdCheck.errorCode,\n    );\n  }\n\n  return {\n    json: {\n      dispatch_kind: 'operation_retry',\n      dispatch_status: 'ready',\n      integrity_failure: false,\n\n      destination_workflow:\n        expectedDestination,\n\n      candidate_source:\n        candidate.candidate_source,\n\n      candidate_class:\n        candidate.candidate_class,\n\n      external_operation_id:\n        candidate.external_operation_id,\n\n      operation_type:\n        candidate.operation_type,\n\n      case_id:\n        candidate.case_id,\n\n      correlation_id:\n        candidate.correlation_id,\n\n      payload: {\n        case_id:\n          candidate.case_id,\n\n        correlation_id:\n          candidate.correlation_id,\n\n        external_operation_id:\n          candidate.external_operation_id,\n\n        trigger_source: 'wf98',\n      },\n    },\n  };\n}\n\nif (\n  candidate.candidate_source ===\n  'state_gap'\n) {\n  const caseIdCheck = requireUuid(\n    candidate.case_id,\n    'case_id',\n  );\n\n  if (!caseIdCheck.valid) {\n    return integrityFailure(\n      caseIdCheck.errorCode,\n    );\n  }\n\n  const correlationIdCheck = requireUuid(\n    candidate.correlation_id,\n    'correlation_id',\n  );\n\n  if (!correlationIdCheck.valid) {\n    return integrityFailure(\n      correlationIdCheck.errorCode,\n    );\n  }\n\n  const basePayload = {\n    case_id:\n      candidate.case_id,\n\n    correlation_id:\n      candidate.correlation_id,\n\n    trigger_source: 'wf98',\n\n    recovery_reason:\n      candidate.recovery_reason,\n  };\n\n  if (\n    candidate.candidate_class ===\n    'pending_submission_validation'\n  ) {\n    if (\n      candidate.destination_workflow !==\n      'WF03'\n    ) {\n      return integrityFailure(\n        'destination_mapping_mismatch',\n      );\n    }\n\n    const submissionIdCheck = requireUuid(\n      candidate.submission_id,\n      'submission_id',\n    );\n\n    if (!submissionIdCheck.valid) {\n      return integrityFailure(\n        submissionIdCheck.errorCode,\n      );\n    }\n\n    return {\n      json: {\n        dispatch_kind: 'state_gap',\n        dispatch_status: 'ready',\n        integrity_failure: false,\n\n        destination_workflow: 'WF03',\n\n        candidate_source:\n          candidate.candidate_source,\n\n        candidate_class:\n          candidate.candidate_class,\n\n        case_id:\n          candidate.case_id,\n\n        correlation_id:\n          candidate.correlation_id,\n\n        payload: {\n          ...basePayload,\n\n          submission_id:\n            candidate.submission_id,\n        },\n      },\n    };\n  }\n\n  if (\n    candidate.candidate_class ===\n    'missing_initial_client_data_dispatch'\n  ) {\n    if (\n      candidate.destination_workflow !==\n        'WF02' ||\n      candidate.request_cycle_key !==\n        'initial'\n    ) {\n      return integrityFailure(\n        'invalid_initial_client_data_gap',\n      );\n    }\n\n    return {\n      json: {\n        dispatch_kind: 'state_gap',\n        dispatch_status: 'ready',\n        integrity_failure: false,\n\n        destination_workflow: 'WF02',\n\n        candidate_source:\n          candidate.candidate_source,\n\n        candidate_class:\n          candidate.candidate_class,\n\n        case_id:\n          candidate.case_id,\n\n        correlation_id:\n          candidate.correlation_id,\n\n        payload: {\n          ...basePayload,\n\n          request_cycle_key: 'initial',\n        },\n      },\n    };\n  }\n\n  if (\n    candidate.candidate_class ===\n    'missing_correction_dispatch'\n  ) {\n    if (\n      candidate.destination_workflow !==\n      'WF02'\n    ) {\n      return integrityFailure(\n        'destination_mapping_mismatch',\n      );\n    }\n\n    const failedSubmissionCheck =\n      requireUuid(\n        candidate.failed_submission_id,\n        'failed_submission_id',\n      );\n\n    if (!failedSubmissionCheck.valid) {\n      return integrityFailure(\n        failedSubmissionCheck.errorCode,\n      );\n    }\n\n    const expectedCycleKey =\n      `validation_failed:${candidate.failed_submission_id}`;\n\n    if (\n      candidate.request_cycle_key !==\n      expectedCycleKey\n    ) {\n      return integrityFailure(\n        'request_cycle_key_mismatch',\n      );\n    }\n\n    return {\n      json: {\n        dispatch_kind: 'state_gap',\n        dispatch_status: 'ready',\n        integrity_failure: false,\n\n        destination_workflow: 'WF02',\n\n        candidate_source:\n          candidate.candidate_source,\n\n        candidate_class:\n          candidate.candidate_class,\n\n        case_id:\n          candidate.case_id,\n\n        correlation_id:\n          candidate.correlation_id,\n\n        payload: {\n          ...basePayload,\n\n          request_cycle_key:\n            candidate.request_cycle_key,\n\n          failed_submission_id:\n            candidate.failed_submission_id,\n        },\n      },\n    };\n  }\n\n  const fixedStateGapDestinations = {\n    missing_approval_dispatch: 'WF04',\n    missing_provisioning_dispatch: 'WF05',\n    missing_finalization_dispatch: 'WF06',\n    resume_finalization: 'WF06',\n    complete_finalization: 'WF06',\n  };\n\n  const expectedDestination =\n    fixedStateGapDestinations[\n      candidate.candidate_class\n    ];\n\n  if (!expectedDestination) {\n    return integrityFailure(\n      'unknown_state_gap_type',\n    );\n  }\n\n  if (\n    candidate.destination_workflow !==\n    expectedDestination\n  ) {\n    return integrityFailure(\n      'destination_mapping_mismatch',\n    );\n  }\n\n  return {\n    json: {\n      dispatch_kind: 'state_gap',\n      dispatch_status: 'ready',\n      integrity_failure: false,\n\n      destination_workflow:\n        expectedDestination,\n\n      candidate_source:\n        candidate.candidate_source,\n\n      candidate_class:\n        candidate.candidate_class,\n\n      case_id:\n        candidate.case_id,\n\n      correlation_id:\n        candidate.correlation_id,\n\n      payload: basePayload,\n    },\n  };\n}\n\nreturn integrityFailure(\n  'unknown_candidate_source',\n);"},"type":"n8n-nodes-base.code","typeVersion":2,"position":[80,-160],"id":"5a96b53f-8676-42d1-8aa9-0fddd3317cd6","name":"Prepare Dispatch"},{"parameters":{"rules":{"values":[{"conditions":{"options":{"caseSensitive":true,"leftValue":"","typeValidation":"strict","version":3},"conditions":[{"leftValue":"={{ $json.destination_workflow }}","rightValue":"WF02","operator":{"type":"string","operation":"equals"},"id":"95defe1e-84f2-43bd-ac29-0bc675fe10b5"}],"combinator":"and"},"renameOutput":true,"outputKey":"WF02"},{"conditions":{"options":{"caseSensitive":true,"leftValue":"","typeValidation":"strict","version":3},"conditions":[{"id":"a159b002-2fd7-41d9-8e01-d498d6ef4873","leftValue":"={{ $json.destination_workflow }}","rightValue":"WF03","operator":{"type":"string","operation":"equals","name":"filter.operator.equals"}}],"combinator":"and"},"renameOutput":true,"outputKey":"WF03"},{"conditions":{"options":{"caseSensitive":true,"leftValue":"","typeValidation":"strict","version":3},"conditions":[{"id":"8b4fe3b3-4526-4a59-b862-75396b0982ca","leftValue":"={{ $json.destination_workflow }}","rightValue":"WF04","operator":{"type":"string","operation":"equals","name":"filter.operator.equals"}}],"combinator":"and"},"renameOutput":true,"outputKey":"WF04"},{"conditions":{"options":{"caseSensitive":true,"leftValue":"","typeValidation":"strict","version":3},"conditions":[{"id":"e3d55ce7-4220-4228-8ff0-c9c97dafdb68","leftValue":"={{ $json.destination_workflow }}","rightValue":"WF05","operator":{"type":"string","operation":"equals","name":"filter.operator.equals"}}],"combinator":"and"},"renameOutput":true,"outputKey":"WF05"},{"conditions":{"options":{"caseSensitive":true,"leftValue":"","typeValidation":"strict","version":3},"conditions":[{"id":"7692081d-e0cb-4911-a763-19e0745fb355","leftValue":"={{ $json.destination_workflow }}","rightValue":"WF06","operator":{"type":"string","operation":"equals","name":"filter.operator.equals"}}],"combinator":"and"},"renameOutput":true,"outputKey":"WF06"},{"conditions":{"options":{"caseSensitive":true,"leftValue":"","typeValidation":"strict","version":3},"conditions":[{"id":"dc5ab3ac-0d8f-4372-b59c-4cbbae2cfd4b","leftValue":"={{ $json.destination_workflow }}","rightValue":"WF99","operator":{"type":"string","operation":"equals","name":"filter.operator.equals"}}],"combinator":"and"},"renameOutput":true,"outputKey":"WF99"}]},"options":{}},"type":"n8n-nodes-base.switch","typeVersion":3.4,"position":[528,-64],"id":"8cd0069d-2a5b-43bc-ae0f-76962691a3ab","name":"Route Destination"},{"parameters":{"jsCode":"// Build a sanitized WF98 summary when no candidates were selected.\n\nfunction readBoundedInteger(name, fallback) {\n  const rawValue = $env[name];\n\n  const value =\n    rawValue === null ||\n    rawValue === undefined ||\n    String(rawValue).trim() === ''\n      ? fallback\n      : Number(rawValue);\n\n  if (\n    !Number.isInteger(value) ||\n    value < 1 ||\n    value > 200\n  ) {\n    throw new Error(\n      `${name} must be an integer between 1 and 200`,\n    );\n  }\n\n  return value;\n}\n\nconst batchSize = readBoundedInteger(\n  'WF98_BATCH_SIZE',\n  50,\n);\n\nconst maxDispatchesPerRun = readBoundedInteger(\n  'WF98_MAX_DISPATCHES_PER_RUN',\n  50,\n);\n\nconst startedAt =\n  $execution.startedAt instanceof Date\n    ? $execution.startedAt.toISOString()\n    : new Date(\n        $execution.startedAt ?? Date.now(),\n      ).toISOString();\n\nreturn [\n  {\n    json: {\n      workflow: 'WF98',\n      result: 'completed',\n\n      selected_count: 0,\n      dispatch_accepted_count: 0,\n      dispatch_failed_count: 0,\n      integrity_failure_count: 0,\n\n      batch_limit: Math.min(\n        batchSize,\n        maxDispatchesPerRun,\n      ),\n\n      started_at: startedAt,\n      finished_at: new Date().toISOString(),\n    },\n  },\n];"},"type":"n8n-nodes-base.code","typeVersion":2,"position":[80,96],"id":"efe6e6e1-340b-46ff-8ef2-b5e813fe2cb4","name":"Build Empty Run Summary"},{"parameters":{"mode":"runOnceForEachItem","jsCode":"// Pass only the validated payload to WF02.\n// Internal WF98 routing fields must not leave this workflow.\n\nconst payload = $json.payload;\n\nif (\n  payload === null ||\n  typeof payload !== 'object' ||\n  Array.isArray(payload)\n) {\n  throw new Error(\n    'WF98 dispatch payload for WF02 must be a JSON object',\n  );\n}\n\nreturn {\n  json: payload,\n};"},"type":"n8n-nodes-base.code","typeVersion":2,"position":[688,-432],"id":"3333aae8-aaa3-4cc9-a947-e6116fed9aaf","name":"Build WF02 Input"},{"parameters":{"jsCode":"// Pass only the validated payload to the destination workflow.\n// Internal WF98 routing fields must not leave WF98.\n\nconst payload = $json.payload;\n\nif (\n  payload === null ||\n  typeof payload !== 'object' ||\n  Array.isArray(payload)\n) {\n  throw new Error(\n    'WF98 dispatch payload must be a JSON object',\n  );\n}\n\nreturn {\n  json: payload,\n};"},"type":"n8n-nodes-base.code","typeVersion":2,"position":[816,-320],"id":"7d02fd1a-ced6-40d8-b610-95b3c2c2b106","name":"Build WF03 Input"},{"parameters":{"jsCode":"// Pass only the validated payload to the destination workflow.\n// Internal WF98 routing fields must not leave WF98.\n\nconst payload = $json.payload;\n\nif (\n  payload === null ||\n  typeof payload !== 'object' ||\n  Array.isArray(payload)\n) {\n  throw new Error(\n    'WF98 dispatch payload must be a JSON object',\n  );\n}\n\nreturn {\n  json: payload,\n};"},"type":"n8n-nodes-base.code","typeVersion":2,"position":[816,-160],"id":"185c7927-b599-4000-a34c-338a62ce11bc","name":"Build WF04 Input"},{"parameters":{"jsCode":"// Pass only the validated payload to the destination workflow.\n// Internal WF98 routing fields must not leave WF98.\n\nconst payload = $json.payload;\n\nif (\n  payload === null ||\n  typeof payload !== 'object' ||\n  Array.isArray(payload)\n) {\n  throw new Error(\n    'WF98 dispatch payload must be a JSON object',\n  );\n}\n\nreturn {\n  json: payload,\n};"},"type":"n8n-nodes-base.code","typeVersion":2,"position":[832,16],"id":"978de648-5e9b-4cd0-9368-e1e4b331c55f","name":"Build WF05 Input"},{"parameters":{"jsCode":"// Pass only the validated payload to the destination workflow.\n// Internal WF98 routing fields must not leave WF98.\n\nconst payload = $json.payload;\n\nif (\n  payload === null ||\n  typeof payload !== 'object' ||\n  Array.isArray(payload)\n) {\n  throw new Error(\n    'WF98 dispatch payload must be a JSON object',\n  );\n}\n\nreturn {\n  json: payload,\n};"},"type":"n8n-nodes-base.code","typeVersion":2,"position":[832,176],"id":"cec49fed-74bb-4cd9-bd22-0852a3f83f5f","name":"Build WF06 Input"},{"parameters":{"jsCode":"// Pass only the validated payload to the destination workflow.\n// Internal WF98 routing fields must not leave WF98.\n\nconst payload = $json.payload;\n\nif (\n  payload === null ||\n  typeof payload !== 'object' ||\n  Array.isArray(payload)\n) {\n  throw new Error(\n    'WF98 dispatch payload must be a JSON object',\n  );\n}\n\nreturn {\n  json: payload,\n};"},"type":"n8n-nodes-base.code","typeVersion":2,"position":[704,304],"id":"766d64f7-07b6-4b57-b255-21607366ac06","name":"Build WF99 Input"},{"parameters":{"workflowId":{"__rl":true,"value":"88LyNKhTaGGFKvKc","mode":"list","cachedResultUrl":"/workflow/88LyNKhTaGGFKvKc","cachedResultName":"WF02 - Request Client Data"},"workflowInputs":{"mappingMode":"defineBelow","value":{},"matchingColumns":[],"schema":[],"attemptToConvertTypes":false,"convertFieldsToString":true},"options":{"waitForSubWorkflow":true}},"type":"n8n-nodes-base.executeWorkflow","typeVersion":1.3,"position":[1136,-544],"id":"cd553ab8-84a5-43fe-9d1a-35a709d02e0b","name":"Dispatch WF02","alwaysOutputData":false,"onError":"continueErrorOutput"},{"parameters":{"workflowId":{"__rl":true,"value":"CVHTFKM97aBHhmXf","mode":"list","cachedResultUrl":"/workflow/CVHTFKM97aBHhmXf","cachedResultName":"WF03 - Receive and Validate Client Data"},"workflowInputs":{"mappingMode":"defineBelow","value":{},"matchingColumns":[],"schema":[],"attemptToConvertTypes":false,"convertFieldsToString":true},"options":{"waitForSubWorkflow":true}},"type":"n8n-nodes-base.executeWorkflow","typeVersion":1.3,"position":[1136,-352],"id":"382b721a-082a-4de9-ab33-267a311d9a59","name":"Dispatch WF03","alwaysOutputData":false,"onError":"continueErrorOutput"},{"parameters":{"workflowId":{"__rl":true,"value":"I6nqXCOFa3qycHtY","mode":"list","cachedResultUrl":"/workflow/I6nqXCOFa3qycHtY","cachedResultName":"WF04 - Manual Approval"},"workflowInputs":{"mappingMode":"defineBelow","value":{},"matchingColumns":[],"schema":[],"attemptToConvertTypes":false,"convertFieldsToString":true},"options":{"waitForSubWorkflow":true}},"type":"n8n-nodes-base.executeWorkflow","typeVersion":1.3,"position":[1136,-160],"id":"8acd3826-f324-4703-b797-0c6927507f22","name":"Dispatch WF04","alwaysOutputData":false,"onError":"continueErrorOutput"},{"parameters":{"workflowId":{"__rl":true,"value":"1nU3HodQoHZJPuHX","mode":"list","cachedResultUrl":"/workflow/1nU3HodQoHZJPuHX","cachedResultName":"WF05 - Provision Client"},"workflowInputs":{"mappingMode":"defineBelow","value":{},"matchingColumns":[],"schema":[],"attemptToConvertTypes":false,"convertFieldsToString":true},"options":{"waitForSubWorkflow":true}},"type":"n8n-nodes-base.executeWorkflow","typeVersion":1.3,"position":[1152,16],"id":"c20e1bef-c0d1-4fd2-bdb1-5065b4a9f6fe","name":"Dispatch WF05","alwaysOutputData":false,"onError":"continueErrorOutput"},{"parameters":{"workflowId":{"__rl":true,"value":"Rq9cHpFYeS8tqYPf","mode":"list","cachedResultUrl":"/workflow/Rq9cHpFYeS8tqYPf","cachedResultName":"WF06 - Finalize Onboarding"},"workflowInputs":{"mappingMode":"defineBelow","value":{},"matchingColumns":[],"schema":[],"attemptToConvertTypes":false,"convertFieldsToString":true},"options":{"waitForSubWorkflow":true}},"type":"n8n-nodes-base.executeWorkflow","typeVersion":1.3,"position":[1152,192],"id":"ead3dc37-04a9-4875-9ae4-aabb9cbf59e7","name":"Dispatch WF","alwaysOutputData":false,"onError":"continueErrorOutput"},{"parameters":{"workflowId":{"__rl":true,"value":"WykBM7mvCOqph91a","mode":"list","cachedResultUrl":"/workflow/WykBM7mvCOqph91a","cachedResultName":"WF99 - Central Error Handler"},"workflowInputs":{"mappingMode":"defineBelow","value":{},"matchingColumns":[],"schema":[],"attemptToConvertTypes":false,"convertFieldsToString":true},"options":{"waitForSubWorkflow":true}},"type":"n8n-nodes-base.executeWorkflow","typeVersion":1.3,"position":[1152,400],"id":"56b71cd9-8cce-46b4-84c3-94e36b08676d","name":"Dispatch WF99","alwaysOutputData":true,"onError":"continueErrorOutput"},{"parameters":{"options":{}},"type":"n8n-nodes-base.splitInBatches","typeVersion":3,"position":[256,-32],"id":"c277206e-15a8-4308-b0c8-437700d6a075","name":"Loop Over Dispatch Candidates"},{"parameters":{"assignments":{"assignments":[{"id":"8beac59e-6bc8-4eea-b25a-7dbc859dcc10","name":"dispatch_outcome","value":"accepted","type":"string"},{"id":"93a522d9-fdf5-4e8b-89f9-6ce0161c7bf6","name":"integrity_failure","value":"={{ $('Prepare Dispatch').item.json.integrity_failure === true }}","type":"boolean"}]},"includeOtherFields":true,"options":{}},"type":"n8n-nodes-base.set","typeVersion":3.4,"position":[1824,-240],"id":"95c99f78-ad32-4c3b-b7d7-6ee5dceaa93f","name":"Mark Dispatch Accepted","alwaysOutputData":true},{"parameters":{"assignments":{"assignments":[{"id":"74852e34-9e10-45e1-b617-864f6cd0687d","name":"dispatch_outcome","value":"failed","type":"string"},{"id":"94e28f94-025a-42fa-9959-70b833cad6f4","name":"integrity_failure","value":"={{ $('Prepare Dispatch').item.json.integrity_failure === true }}","type":"boolean"}]},"includeOtherFields":true,"options":{}},"type":"n8n-nodes-base.set","typeVersion":3.4,"position":[1840,32],"id":"140d1114-4610-4711-a1b7-aebfdec48a43","name":"Mark Dispatch Failed"},{"parameters":{"jsCode":"// Build one sanitized WF98 summary after all dispatch attempts finish.\n\nfunction readBoundedInteger(name, fallback) {\n  const rawValue = $env[name];\n\n  const value =\n    rawValue === null ||\n    rawValue === undefined ||\n    String(rawValue).trim() === ''\n      ? fallback\n      : Number(rawValue);\n\n  if (\n    !Number.isInteger(value) ||\n    value < 1 ||\n    value > 200\n  ) {\n    throw new Error(\n      `${name} must be an integer between 1 and 200`,\n    );\n  }\n\n  return value;\n}\n\nconst items = $input.all();\n\nconst selectedCount = items.length;\n\nconst dispatchAcceptedCount = items.filter(\n  (item) =>\n    item.json?.dispatch_outcome === 'accepted',\n).length;\n\nconst dispatchFailedCount = items.filter(\n  (item) =>\n    item.json?.dispatch_outcome === 'failed',\n).length;\n\nconst classifiedCount =\n  dispatchAcceptedCount + dispatchFailedCount;\n\nif (classifiedCount !== selectedCount) {\n  throw new Error(\n    `WF98 summary expected ${selectedCount} classified dispatch results, received ${classifiedCount}`,\n  );\n}\n\nconst integrityFailureCount = items.filter(\n  (item) =>\n    item.json?.integrity_failure === true,\n).length;\n\nconst batchSize = readBoundedInteger(\n  'WF98_BATCH_SIZE',\n  50,\n);\n\nconst maxDispatchesPerRun = readBoundedInteger(\n  'WF98_MAX_DISPATCHES_PER_RUN',\n  50,\n);\n\nconst startedAt =\n  $execution.startedAt instanceof Date\n    ? $execution.startedAt.toISOString()\n    : new Date(\n        $execution.startedAt ?? Date.now(),\n      ).toISOString();\n\nreturn [\n  {\n    json: {\n      workflow: 'WF98',\n      result: 'completed',\n\n      selected_count: selectedCount,\n      dispatch_accepted_count:\n        dispatchAcceptedCount,\n      dispatch_failed_count:\n        dispatchFailedCount,\n      integrity_failure_count:\n        integrityFailureCount,\n\n      batch_limit: Math.min(\n        batchSize,\n        maxDispatchesPerRun,\n      ),\n\n      started_at: startedAt,\n      finished_at: new Date().toISOString(),\n    },\n  },\n];"},"type":"n8n-nodes-base.code","typeVersion":2,"position":[848,-720],"id":"b730abf0-ae21-40d9-8de7-801273d899ac","name":"Build Run Summary","alwaysOutputData":false}],"pinData":{},"connections":{"Schedule Trigger":{"main":[[{"node":"Validate WF98 Configuration","type":"main","index":0}]]},"Validate WF98 Configuration":{"main":[[{"node":"Select WF98 Candidates","type":"main","index":0}]]},"Select WF98 Candidates":{"main":[[{"node":"Candidates Found?","type":"main","index":0}]]},"Candidates Found?":{"main":[[{"node":"Prepare Dispatch","type":"main","index":0}],[{"node":"Build Empty Run Summary","type":"main","index":0}]]},"Prepare Dispatch":{"main":[[{"node":"Loop Over Dispatch Candidates","type":"main","index":0}]]},"Route Destination":{"main":[[{"node":"Build WF02 Input","type":"main","index":0}],[{"node":"Build WF03 Input","type":"main","index":0}],[{"node":"Build WF04 Input","type":"main","index":0}],[{"node":"Build WF05 Input","type":"main","index":0}],[{"node":"Build WF06 Input","type":"main","index":0}],[{"node":"Build WF99 Input","type":"main","index":0}]]},"Build WF02 Input":{"main":[[{"node":"Dispatch WF02","type":"main","index":0}]]},"Build WF03 Input":{"main":[[{"node":"Dispatch WF03","type":"main","index":0}]]},"Build WF04 Input":{"main":[[{"node":"Dispatch WF04","type":"main","index":0}]]},"Build WF05 Input":{"main":[[{"node":"Dispatch WF05","type":"main","index":0}]]},"Build WF06 Input":{"main":[[{"node":"Dispatch WF","type":"main","index":0}]]},"Build WF99 Input":{"main":[[{"node":"Dispatch WF99","type":"main","index":0}]]},"Loop Over Dispatch Candidates":{"main":[[{"node":"Build Run Summary","type":"main","index":0}],[{"node":"Route Destination","type":"main","index":0}]]},"Dispatch WF02":{"main":[[{"node":"Mark Dispatch Accepted","type":"main","index":0}],[{"node":"Mark Dispatch Failed","type":"main","index":0}]]},"Dispatch WF03":{"main":[[{"node":"Mark Dispatch Accepted","type":"main","index":0}],[{"node":"Mark Dispatch Failed","type":"main","index":0}]]},"Dispatch WF04":{"main":[[{"node":"Mark Dispatch Accepted","type":"main","index":0}],[{"node":"Mark Dispatch Failed","type":"main","index":0}]]},"Dispatch WF05":{"main":[[{"node":"Mark Dispatch Accepted","type":"main","index":0}],[{"node":"Mark Dispatch Failed","type":"main","index":0}]]},"Dispatch WF":{"main":[[{"node":"Mark Dispatch Accepted","type":"main","index":0}],[{"node":"Mark Dispatch Failed","type":"main","index":0}]]},"Dispatch WF99":{"main":[[{"node":"Mark Dispatch Accepted","type":"main","index":0}],[{"node":"Mark Dispatch Failed","type":"main","index":0}]]},"Mark Dispatch Accepted":{"main":[[{"node":"Loop Over Dispatch Candidates","type":"main","index":0}]]},"Mark Dispatch Failed":{"main":[[{"node":"Loop Over Dispatch Candidates","type":"main","index":0}]]}},"active":false,"settings":{"executionOrder":"v1","binaryMode":"separate","availableInMCP":false,"timeSavedMode":"fixed","errorWorkflow":"WykBM7mvCOqph91a","callerPolicy":"workflowsFromSameOwner"},"versionId":"a2155cb2-c950-4697-9e37-9ebe268657e3","meta":{"templateCredsSetupCompleted":true,"instanceId":"72249f432a77256c34affd74b688f3209ef91628f0f09e01d73ae5bb45f3c5f3"},"nodeGroups":[],"id":"o5coDcd0qjFSgjA5","tags":[]}
+{
+  "name": "WF98 - Retry Dispatcher",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "minutes",
+              "minutesInterval": 1
+            }
+          ]
+        }
+      },
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.3,
+      "position": [
+        -800,
+        -48
+      ],
+      "id": "00282f7f-4163-4511-9412-268565ebdaae",
+      "name": "Schedule Trigger"
+    },
+    {
+      "parameters": {
+        "jsCode": "// WF98 validates protected runtime configuration before querying PostgreSQL.\n\nfunction readBoundedInteger(name, fallback) {\n  const rawValue = $env[name];\n\n  const value =\n    rawValue === null ||\n    rawValue === undefined ||\n    String(rawValue).trim() === ''\n      ? fallback\n      : Number(rawValue);\n\n  if (\n    !Number.isInteger(value) ||\n    value < 1 ||\n    value > 200\n  ) {\n    throw new Error(\n      `${name} must be an integer between 1 and 200`,\n    );\n  }\n\n  return value;\n}\n\nconst batchSize = readBoundedInteger(\n  'WF98_BATCH_SIZE',\n  50,\n);\n\nconst maxDispatchesPerRun = readBoundedInteger(\n  'WF98_MAX_DISPATCHES_PER_RUN',\n  50,\n);\n\nconst waitForCompletion = String(\n  $env.WF98_DESTINATION_WAIT_FOR_COMPLETION ??\n    'false',\n)\n  .trim()\n  .toLowerCase();\n\nif (waitForCompletion !== 'false') {\n  throw new Error(\n    'WF98_DESTINATION_WAIT_FOR_COMPLETION must be false',\n  );\n}\n\nreturn [\n  {\n    json: {\n      workflow_name: 'WF98 — Retry Dispatcher',\n      started_at: new Date().toISOString(),\n\n      batch_size: batchSize,\n\n      max_dispatches_per_run:\n        maxDispatchesPerRun,\n\n      operation_candidate_limit: Math.min(\n        batchSize,\n        maxDispatchesPerRun,\n      ),\n\n      destination_wait_for_completion: false,\n    },\n  },\n];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -576,
+        -48
+      ],
+      "id": "547b9d52-bd7e-4db6-bba9-87e89a5957b6",
+      "name": "Validate WF98 Configuration"
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "WITH latest_submission AS (\n  SELECT DISTINCT ON (submission.case_id)\n    submission.case_id,\n    submission.id,\n    submission.form_token_id,\n    submission.submission_sequence,\n    submission.validation_status\n  FROM onboarding_submissions AS submission\n  ORDER BY\n    submission.case_id,\n    submission.submission_sequence DESC,\n    submission.id DESC\n),\n\npending_submission_counts AS (\n  SELECT\n    submission.case_id,\n    count(*) FILTER (\n      WHERE submission.validation_status = 'pending'\n    ) AS pending_count\n  FROM onboarding_submissions AS submission\n  GROUP BY submission.case_id\n),\n\nfinalizing_snapshot AS (\n  SELECT\n    onboarding_case.id AS case_id,\n    onboarding_case.correlation_id,\n    onboarding_case.state AS case_state,\n    onboarding_case.updated_at,\n\n    drive_operation.id AS drive_operation_id,\n    drive_operation.status AS drive_operation_status,\n    drive_operation.external_id AS drive_external_id,\n    drive_step.status AS drive_step_status,\n\n    kickoff_operation.id AS kickoff_operation_id,\n    kickoff_operation.status AS kickoff_operation_status,\n    kickoff_operation.external_id AS kickoff_external_id,\n    kickoff_step.status AS kickoff_step_status,\n\n    team_operation.id AS team_operation_id,\n    team_operation.status AS team_operation_status,\n    team_operation.external_id AS team_external_id,\n    team_step.status AS team_step_status\n\n  FROM onboarding_cases AS onboarding_case\n\n  LEFT JOIN onboarding_steps AS drive_step\n    ON drive_step.case_id = onboarding_case.id\n   AND drive_step.step_type = 'create_drive_folder'\n\n  LEFT JOIN onboarding_steps AS kickoff_step\n    ON kickoff_step.case_id = onboarding_case.id\n   AND kickoff_step.step_type = 'create_kickoff_event'\n\n  LEFT JOIN onboarding_steps AS team_step\n    ON team_step.case_id = onboarding_case.id\n   AND team_step.step_type = 'notify_team'\n\n  LEFT JOIN LATERAL (\n    SELECT operation.*\n    FROM external_operations AS operation\n    WHERE operation.case_id = onboarding_case.id\n      AND operation.operation_type = 'create_drive_folder'\n    ORDER BY\n      operation.created_at DESC,\n      operation.id DESC\n    LIMIT 1\n  ) AS drive_operation ON true\n\n  LEFT JOIN LATERAL (\n    SELECT operation.*\n    FROM external_operations AS operation\n    WHERE operation.case_id = onboarding_case.id\n      AND operation.operation_type = 'create_kickoff_event'\n    ORDER BY\n      operation.created_at DESC,\n      operation.id DESC\n    LIMIT 1\n  ) AS kickoff_operation ON true\n\n  LEFT JOIN LATERAL (\n    SELECT operation.*\n    FROM external_operations AS operation\n    WHERE operation.case_id = onboarding_case.id\n      AND operation.operation_type = 'notify_team'\n    ORDER BY\n      operation.created_at DESC,\n      operation.id DESC\n    LIMIT 1\n  ) AS team_operation ON true\n\n  WHERE onboarding_case.state = 'finalizing'\n),\n\noperation_candidates AS (\n  SELECT\n    'external_operation'::text AS candidate_source,\n\n    CASE\n      WHEN operation.status = 'in_progress'\n        THEN 1\n      WHEN operation.status = 'failed_retryable'\n        THEN 2\n    END AS candidate_priority,\n\n    CASE\n      WHEN operation.status = 'in_progress'\n        THEN 'expired_lease'\n      WHEN operation.status = 'failed_retryable'\n        THEN 'due_retry'\n    END AS candidate_class,\n\n    operation.id AS external_operation_id,\n    operation.operation_type,\n    operation.status AS operation_status,\n\n    operation.case_id,\n    onboarding_case.correlation_id,\n    onboarding_case.state AS case_state,\n\n    CASE\n      WHEN operation.operation_type = 'send_client_data_request'\n        THEN 'WF02'\n      WHEN operation.operation_type = 'send_approval_request'\n        THEN 'WF04'\n      WHEN operation.operation_type = 'provision_client'\n        THEN 'WF05'\n      WHEN operation.operation_type IN (\n        'create_drive_folder',\n        'create_kickoff_event',\n        'notify_team'\n      )\n        THEN 'WF06'\n      WHEN operation.operation_type = 'notify_operator_intervention'\n        THEN 'WF99'\n      ELSE NULL\n    END AS destination_workflow,\n\n    NULL::text AS recovery_reason,\n    NULL::uuid AS submission_id,\n    NULL::uuid AS failed_submission_id,\n    NULL::text AS request_cycle_key,\n\n    CASE\n      WHEN operation.status = 'in_progress'\n        THEN operation.lease_expires_at\n      ELSE operation.next_retry_at\n    END AS sort_at,\n\n    operation.id::text AS candidate_id\n\n  FROM external_operations AS operation\n\n  LEFT JOIN onboarding_cases AS onboarding_case\n    ON onboarding_case.id = operation.case_id\n\n  WHERE (\n    operation.status = 'in_progress'\n    AND operation.lease_expires_at IS NOT NULL\n    AND operation.lease_expires_at <= clock_timestamp()\n  )\n  OR (\n    operation.status = 'failed_retryable'\n    AND operation.next_retry_at IS NOT NULL\n    AND operation.next_retry_at <= clock_timestamp()\n    AND operation.attempt_count < operation.max_attempts\n  )\n),\n\nstate_gap_candidates AS (\n  /*\n   * Priority 3:\n   * submission validation did not continue after token consumption.\n   */\n  SELECT\n    'state_gap'::text AS candidate_source,\n    3 AS candidate_priority,\n    'pending_submission_validation'::text AS candidate_class,\n\n    NULL::uuid AS external_operation_id,\n    NULL::text AS operation_type,\n    NULL::text AS operation_status,\n\n    onboarding_case.id AS case_id,\n    onboarding_case.correlation_id,\n    onboarding_case.state AS case_state,\n\n    'WF03'::text AS destination_workflow,\n    'pending_submission_validation'::text AS recovery_reason,\n\n    latest_submission.id AS submission_id,\n    NULL::uuid AS failed_submission_id,\n    NULL::text AS request_cycle_key,\n\n    onboarding_case.updated_at AS sort_at,\n    (\n      onboarding_case.id::text ||\n      ':pending_submission_validation'\n    ) AS candidate_id\n\n  FROM onboarding_cases AS onboarding_case\n\n  JOIN latest_submission\n    ON latest_submission.case_id = onboarding_case.id\n\n  JOIN pending_submission_counts\n    ON pending_submission_counts.case_id = onboarding_case.id\n\n  JOIN onboarding_form_tokens AS form_token\n    ON form_token.id = latest_submission.form_token_id\n   AND form_token.case_id = onboarding_case.id\n\n  WHERE onboarding_case.state = 'data_received'\n    AND pending_submission_counts.pending_count = 1\n    AND latest_submission.validation_status = 'pending'\n    AND form_token.status = 'consumed'\n\n  UNION ALL\n\n  /*\n   * Priority 4:\n   * created case exists, but WF02 initial dispatch is missing.\n   */\n  SELECT\n    'state_gap',\n    4,\n    'missing_initial_client_data_dispatch',\n\n    NULL::uuid,\n    NULL::text,\n    NULL::text,\n\n    onboarding_case.id,\n    onboarding_case.correlation_id,\n    onboarding_case.state,\n\n    'WF02',\n    'missing_initial_dispatch',\n\n    NULL::uuid,\n    NULL::uuid,\n    'initial',\n\n    onboarding_case.updated_at,\n    (\n      onboarding_case.id::text ||\n      ':missing_initial_client_data_dispatch'\n    )\n\n  FROM onboarding_cases AS onboarding_case\n\n  WHERE onboarding_case.state = 'created'\n    AND NOT EXISTS (\n      SELECT 1\n      FROM external_operations AS operation\n      WHERE operation.case_id = onboarding_case.id\n        AND operation.operation_type =\n          'send_client_data_request'\n        AND operation.status <> 'pending'\n    )\n\n  UNION ALL\n\n  /*\n   * Priority 4:\n   * validation failure exists, but correction dispatch is missing.\n   */\n  SELECT\n    'state_gap',\n    4,\n    'missing_correction_dispatch',\n\n    NULL::uuid,\n    NULL::text,\n    NULL::text,\n\n    onboarding_case.id,\n    onboarding_case.correlation_id,\n    onboarding_case.state,\n\n    'WF02',\n    'missing_correction_dispatch',\n\n    NULL::uuid,\n    latest_submission.id,\n    (\n      'validation_failed:' ||\n      latest_submission.id::text\n    ),\n\n    onboarding_case.updated_at,\n    (\n      onboarding_case.id::text ||\n      ':missing_correction_dispatch'\n    )\n\n  FROM onboarding_cases AS onboarding_case\n\n  JOIN latest_submission\n    ON latest_submission.case_id = onboarding_case.id\n\n  WHERE onboarding_case.state = 'validation_failed'\n    AND latest_submission.validation_status = 'failed'\n    AND NOT EXISTS (\n      SELECT 1\n      FROM external_operations AS operation\n      WHERE operation.case_id = onboarding_case.id\n        AND operation.operation_type =\n          'send_client_data_request'\n        AND operation.request_summary ->>\n          'request_cycle_key' =\n            (\n              'validation_failed:' ||\n              latest_submission.id::text\n            )\n        AND operation.status <> 'pending'\n    )\n\n  UNION ALL\n\n  /*\n   * Priority 4:\n   * awaiting_approval exists, but WF04 dispatch is missing.\n   */\n  SELECT\n    'state_gap',\n    4,\n    'missing_approval_dispatch',\n\n    NULL::uuid,\n    NULL::text,\n    NULL::text,\n\n    onboarding_case.id,\n    onboarding_case.correlation_id,\n    onboarding_case.state,\n\n    'WF04',\n    'missing_initial_dispatch',\n\n    NULL::uuid,\n    NULL::uuid,\n    NULL::text,\n\n    onboarding_case.updated_at,\n    (\n      onboarding_case.id::text ||\n      ':missing_approval_dispatch'\n    )\n\n  FROM onboarding_cases AS onboarding_case\n\n  JOIN onboarding_steps AS approval_step\n    ON approval_step.case_id = onboarding_case.id\n   AND approval_step.step_type = 'manual_approval'\n\n  WHERE onboarding_case.state = 'awaiting_approval'\n    AND onboarding_case.client_id IS NOT NULL\n    AND onboarding_case.accepted_submission_id IS NOT NULL\n    AND onboarding_case.approval_decision IS NULL\n    AND approval_step.status IN (\n      'pending',\n      'failed_retryable'\n    )\n    AND NOT EXISTS (\n      SELECT 1\n      FROM external_operations AS operation\n      WHERE operation.case_id = onboarding_case.id\n        AND operation.operation_type =\n          'send_approval_request'\n        AND operation.status <> 'pending'\n    )\n\n  UNION ALL\n\n  /*\n   * Priority 4:\n   * approval succeeded, but WF05 dispatch is missing.\n   */\n  SELECT\n    'state_gap',\n    4,\n    'missing_provisioning_dispatch',\n\n    NULL::uuid,\n    NULL::text,\n    NULL::text,\n\n    onboarding_case.id,\n    onboarding_case.correlation_id,\n    onboarding_case.state,\n\n    'WF05',\n    'missing_initial_dispatch',\n\n    NULL::uuid,\n    NULL::uuid,\n    NULL::text,\n\n    onboarding_case.updated_at,\n    (\n      onboarding_case.id::text ||\n      ':missing_provisioning_dispatch'\n    )\n\n  FROM onboarding_cases AS onboarding_case\n\n  JOIN onboarding_steps AS approval_step\n    ON approval_step.case_id = onboarding_case.id\n   AND approval_step.step_type = 'manual_approval'\n\n  JOIN onboarding_steps AS provision_step\n    ON provision_step.case_id = onboarding_case.id\n   AND provision_step.step_type = 'provision_client'\n\n  WHERE onboarding_case.state = 'approved'\n    AND onboarding_case.approval_decision = 'approved'\n    AND onboarding_case.approval_decided_at IS NOT NULL\n    AND onboarding_case.external_client_id IS NULL\n    AND approval_step.status = 'completed'\n    AND approval_step.approval_decision = 'approved'\n    AND provision_step.status IN (\n      'pending',\n      'failed_retryable'\n    )\n    AND NOT EXISTS (\n      SELECT 1\n      FROM external_operations AS operation\n      WHERE operation.case_id = onboarding_case.id\n        AND operation.operation_type = 'provision_client'\n        AND operation.status <> 'pending'\n    )\n\n  UNION ALL\n\n  /*\n   * Priority 4:\n   * provisioning succeeded, but WF06 dispatch is missing.\n   */\n  SELECT\n    'state_gap',\n    4,\n    'missing_finalization_dispatch',\n\n    NULL::uuid,\n    NULL::text,\n    NULL::text,\n\n    onboarding_case.id,\n    onboarding_case.correlation_id,\n    onboarding_case.state,\n\n    'WF06',\n    'missing_initial_dispatch',\n\n    NULL::uuid,\n    NULL::uuid,\n    NULL::text,\n\n    onboarding_case.updated_at,\n    (\n      onboarding_case.id::text ||\n      ':missing_finalization_dispatch'\n    )\n\n  FROM onboarding_cases AS onboarding_case\n\n  JOIN onboarding_steps AS drive_step\n    ON drive_step.case_id = onboarding_case.id\n   AND drive_step.step_type = 'create_drive_folder'\n\n  JOIN onboarding_steps AS kickoff_step\n    ON kickoff_step.case_id = onboarding_case.id\n   AND kickoff_step.step_type = 'create_kickoff_event'\n\n  JOIN onboarding_steps AS team_step\n    ON team_step.case_id = onboarding_case.id\n   AND team_step.step_type = 'notify_team'\n\n  WHERE onboarding_case.state = 'provisioned'\n    AND onboarding_case.external_client_id IS NOT NULL\n    AND btrim(onboarding_case.external_client_id) <> ''\n    AND drive_step.status = 'pending'\n    AND kickoff_step.status = 'pending'\n    AND team_step.status = 'pending'\n    AND NOT EXISTS (\n      SELECT 1\n      FROM external_operations AS operation\n      WHERE operation.case_id = onboarding_case.id\n        AND operation.operation_type IN (\n          'create_drive_folder',\n          'create_kickoff_event',\n          'notify_team'\n        )\n        AND operation.status <> 'pending'\n    )\n\n  UNION ALL\n\n  /*\n   * Priority 5:\n   * finalization must resume from the earliest incomplete operation.\n   */\n  SELECT\n    'state_gap',\n    5,\n    'resume_finalization',\n\n    NULL::uuid,\n    NULL::text,\n    NULL::text,\n\n    snapshot.case_id,\n    snapshot.correlation_id,\n    snapshot.case_state,\n\n    'WF06',\n    'resume_finalization',\n\n    NULL::uuid,\n    NULL::uuid,\n    NULL::text,\n\n    snapshot.updated_at,\n    (\n      snapshot.case_id::text ||\n      ':resume_finalization'\n    )\n\n  FROM finalizing_snapshot AS snapshot\n\n  WHERE (\n    (\n      (\n        snapshot.drive_operation_id IS NULL\n        OR snapshot.drive_operation_status = 'pending'\n      )\n      AND snapshot.drive_step_status = 'pending'\n    )\n    OR (\n      snapshot.drive_operation_status = 'succeeded'\n      AND snapshot.drive_external_id IS NOT NULL\n      AND btrim(snapshot.drive_external_id) <> ''\n      AND snapshot.drive_step_status = 'completed'\n      AND (\n        snapshot.kickoff_operation_id IS NULL\n        OR snapshot.kickoff_operation_status = 'pending'\n      )\n      AND snapshot.kickoff_step_status = 'pending'\n    )\n    OR (\n      snapshot.drive_operation_status = 'succeeded'\n      AND snapshot.drive_external_id IS NOT NULL\n      AND btrim(snapshot.drive_external_id) <> ''\n      AND snapshot.drive_step_status = 'completed'\n      AND snapshot.kickoff_operation_status = 'succeeded'\n      AND snapshot.kickoff_external_id IS NOT NULL\n      AND btrim(snapshot.kickoff_external_id) <> ''\n      AND snapshot.kickoff_step_status = 'completed'\n      AND (\n        snapshot.team_operation_id IS NULL\n        OR snapshot.team_operation_status = 'pending'\n      )\n      AND snapshot.team_step_status = 'pending'\n    )\n  )\n\n  UNION ALL\n\n  /*\n   * Priority 6:\n   * all external operations succeeded, but case completion is missing.\n   */\n  SELECT\n    'state_gap',\n    6,\n    'complete_finalization',\n\n    NULL::uuid,\n    NULL::text,\n    NULL::text,\n\n    snapshot.case_id,\n    snapshot.correlation_id,\n    snapshot.case_state,\n\n    'WF06',\n    'complete_finalization',\n\n    NULL::uuid,\n    NULL::uuid,\n    NULL::text,\n\n    snapshot.updated_at,\n    (\n      snapshot.case_id::text ||\n      ':complete_finalization'\n    )\n\n  FROM finalizing_snapshot AS snapshot\n\n  WHERE snapshot.drive_operation_status = 'succeeded'\n    AND snapshot.drive_external_id IS NOT NULL\n    AND btrim(snapshot.drive_external_id) <> ''\n    AND snapshot.drive_step_status = 'completed'\n\n    AND snapshot.kickoff_operation_status = 'succeeded'\n    AND snapshot.kickoff_external_id IS NOT NULL\n    AND btrim(snapshot.kickoff_external_id) <> ''\n    AND snapshot.kickoff_step_status = 'completed'\n\n    AND snapshot.team_operation_status = 'succeeded'\n    AND snapshot.team_external_id IS NOT NULL\n    AND btrim(snapshot.team_external_id) <> ''\n    AND snapshot.team_step_status = 'completed'\n),\n\nall_candidates AS (\n  SELECT *\n  FROM operation_candidates\n\n  UNION ALL\n\n  SELECT *\n  FROM state_gap_candidates\n)\n\nSELECT\n  candidate_source,\n  candidate_priority,\n  candidate_class,\n\n  external_operation_id,\n  operation_type,\n  operation_status,\n\n  case_id,\n  correlation_id,\n  case_state,\n\n  destination_workflow,\n  recovery_reason,\n\n  submission_id,\n  failed_submission_id,\n  request_cycle_key\n\nFROM all_candidates\n\nORDER BY\n  candidate_priority ASC,\n  sort_at ASC,\n  candidate_id ASC\n\nLIMIT $1::integer;",
+        "options": {
+          "queryReplacement": "={{ $json.operation_candidate_limit }}"
+        }
+      },
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        -368,
+        -48
+      ],
+      "id": "469a1a61-944f-4d28-8c69-f61c58f49b02",
+      "name": "Select WF98 Candidates",
+      "alwaysOutputData": true,
+      "credentials": {
+        "postgres": {
+          "id": "zU4wPvkQFRBSwH0b",
+          "name": "B2B Onboarding App DB"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "37177ef0-810e-4223-b057-395c4c33ebd1",
+              "leftValue": "={{ Boolean($json.candidate_source) }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        -160,
+        -48
+      ],
+      "id": "9b041bc6-a8e5-4bb4-b536-57a156e461e6",
+      "name": "Candidates Found?"
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "// Validate one WF98 candidate and build a minimal safe dispatch payload.\n\nconst candidate = $json;\n\nconst UUID_PATTERN =\n  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;\n\nfunction isUuid(value) {\n  return (\n    typeof value === 'string' &&\n    UUID_PATTERN.test(value)\n  );\n}\n\nfunction requireUuid(value, fieldName) {\n  if (!isUuid(value)) {\n    return {\n      valid: false,\n      errorCode: `invalid_${fieldName}`,\n    };\n  }\n\n  return {\n    valid: true,\n  };\n}\n\nfunction safeText(value, maxLength = 200) {\n  if (\n    value === null ||\n    value === undefined\n  ) {\n    return null;\n  }\n\n  if (\n    typeof value !== 'string' &&\n    typeof value !== 'number' &&\n    typeof value !== 'boolean'\n  ) {\n    return null;\n  }\n\n  const normalized = String(value).trim();\n\n  if (!normalized) {\n    return null;\n  }\n\n  return normalized.slice(0, maxLength);\n}\n\nfunction integrityFailure(errorCode) {\n  return {\n    json: {\n      dispatch_kind: 'integrity_failure',\n      dispatch_status: 'ready',\n      integrity_failure: true,\n\n      destination_workflow: 'WF99',\n\n      candidate_source: safeText(\n        candidate.candidate_source,\n        100,\n      ),\n\n      candidate_class: safeText(\n        candidate.candidate_class,\n        100,\n      ),\n\n      external_operation_id: isUuid(\n        candidate.external_operation_id,\n      )\n        ? candidate.external_operation_id\n        : null,\n\n      operation_type: safeText(\n        candidate.operation_type,\n        100,\n      ),\n\n      case_id: isUuid(candidate.case_id)\n        ? candidate.case_id\n        : null,\n\n      correlation_id: isUuid(\n        candidate.correlation_id,\n      )\n        ? candidate.correlation_id\n        : null,\n\n      payload: {\n        source_variant: 'explicit_internal',\n\n        source_workflow_name:\n          'WF98 — Retry Dispatcher',\n\n        source_workflow_id: safeText(\n          $workflow.id,\n          120,\n        ),\n\n        source_execution_id: safeText(\n          $execution.id,\n          120,\n        ),\n\n        case_id: isUuid(candidate.case_id)\n          ? candidate.case_id\n          : null,\n\n        correlation_id: isUuid(\n          candidate.correlation_id,\n        )\n          ? candidate.correlation_id\n          : null,\n\n        step_id: isUuid(candidate.step_id)\n          ? candidate.step_id\n          : null,\n\n        submission_id: isUuid(\n          candidate.submission_id,\n        )\n          ? candidate.submission_id\n          : null,\n\n        external_operation_id: isUuid(\n          candidate.external_operation_id,\n        )\n          ? candidate.external_operation_id\n          : null,\n\n        error_class:\n          'wf98_candidate_integrity_error',\n\n        error_code: errorCode,\n\n        error_message:\n          `WF98 rejected a malformed or unsupported retry candidate: ${errorCode}`,\n\n        retryable: false,\n        severity: 'critical',\n        requires_intervention: true,\n\n        error_details: {\n          candidate_source: safeText(\n            candidate.candidate_source,\n            100,\n          ),\n\n          candidate_class: safeText(\n            candidate.candidate_class,\n            100,\n          ),\n\n          operation_type: safeText(\n            candidate.operation_type,\n            100,\n          ),\n\n          destination_workflow: safeText(\n            candidate.destination_workflow,\n            100,\n          ),\n        },\n      },\n    },\n  };\n}\n\nconst operationDestinations = {\n  send_client_data_request: 'WF02',\n  send_approval_request: 'WF04',\n  provision_client: 'WF05',\n  create_drive_folder: 'WF06',\n  create_kickoff_event: 'WF06',\n  notify_team: 'WF06',\n  notify_operator_intervention: 'WF99',\n};\n\nif (\n  candidate.candidate_source ===\n  'external_operation'\n) {\n  const operationIdCheck = requireUuid(\n    candidate.external_operation_id,\n    'external_operation_id',\n  );\n\n  if (!operationIdCheck.valid) {\n    return integrityFailure(\n      operationIdCheck.errorCode,\n    );\n  }\n\n  const expectedDestination =\n    operationDestinations[\n      candidate.operation_type\n    ];\n\n  if (!expectedDestination) {\n    return integrityFailure(\n      'unknown_operation_type',\n    );\n  }\n\n  if (\n    candidate.destination_workflow !==\n    expectedDestination\n  ) {\n    return integrityFailure(\n      'destination_mapping_mismatch',\n    );\n  }\n\n  if (\n    candidate.operation_type ===\n    'notify_operator_intervention'\n  ) {\n    return {\n      json: {\n        dispatch_kind: 'operation_retry',\n        dispatch_status: 'ready',\n        integrity_failure: false,\n\n        destination_workflow: 'WF99',\n\n        candidate_source:\n          candidate.candidate_source,\n\n        candidate_class:\n          candidate.candidate_class,\n\n        external_operation_id:\n          candidate.external_operation_id,\n\n        operation_type:\n          candidate.operation_type,\n\n        case_id:\n          candidate.case_id ?? null,\n\n        correlation_id:\n          candidate.correlation_id ?? null,\n\n        payload: {\n          source_variant:\n            'notification_retry',\n\n          trigger_source: 'wf98',\n\n          external_operation_id:\n            candidate.external_operation_id,\n        },\n      },\n    };\n  }\n\n  const caseIdCheck = requireUuid(\n    candidate.case_id,\n    'case_id',\n  );\n\n  if (!caseIdCheck.valid) {\n    return integrityFailure(\n      caseIdCheck.errorCode,\n    );\n  }\n\n  const correlationIdCheck = requireUuid(\n    candidate.correlation_id,\n    'correlation_id',\n  );\n\n  if (!correlationIdCheck.valid) {\n    return integrityFailure(\n      correlationIdCheck.errorCode,\n    );\n  }\n\n  return {\n    json: {\n      dispatch_kind: 'operation_retry',\n      dispatch_status: 'ready',\n      integrity_failure: false,\n\n      destination_workflow:\n        expectedDestination,\n\n      candidate_source:\n        candidate.candidate_source,\n\n      candidate_class:\n        candidate.candidate_class,\n\n      external_operation_id:\n        candidate.external_operation_id,\n\n      operation_type:\n        candidate.operation_type,\n\n      case_id:\n        candidate.case_id,\n\n      correlation_id:\n        candidate.correlation_id,\n\n      payload: {\n        case_id:\n          candidate.case_id,\n\n        correlation_id:\n          candidate.correlation_id,\n\n        external_operation_id:\n          candidate.external_operation_id,\n\n        trigger_source: 'wf98',\n      },\n    },\n  };\n}\n\nif (\n  candidate.candidate_source ===\n  'state_gap'\n) {\n  const caseIdCheck = requireUuid(\n    candidate.case_id,\n    'case_id',\n  );\n\n  if (!caseIdCheck.valid) {\n    return integrityFailure(\n      caseIdCheck.errorCode,\n    );\n  }\n\n  const correlationIdCheck = requireUuid(\n    candidate.correlation_id,\n    'correlation_id',\n  );\n\n  if (!correlationIdCheck.valid) {\n    return integrityFailure(\n      correlationIdCheck.errorCode,\n    );\n  }\n\n  const basePayload = {\n    case_id:\n      candidate.case_id,\n\n    correlation_id:\n      candidate.correlation_id,\n\n    trigger_source: 'wf98',\n\n    recovery_reason:\n      candidate.recovery_reason,\n  };\n\n  if (\n    candidate.candidate_class ===\n    'pending_submission_validation'\n  ) {\n    if (\n      candidate.destination_workflow !==\n      'WF03'\n    ) {\n      return integrityFailure(\n        'destination_mapping_mismatch',\n      );\n    }\n\n    const submissionIdCheck = requireUuid(\n      candidate.submission_id,\n      'submission_id',\n    );\n\n    if (!submissionIdCheck.valid) {\n      return integrityFailure(\n        submissionIdCheck.errorCode,\n      );\n    }\n\n    return {\n      json: {\n        dispatch_kind: 'state_gap',\n        dispatch_status: 'ready',\n        integrity_failure: false,\n\n        destination_workflow: 'WF03',\n\n        candidate_source:\n          candidate.candidate_source,\n\n        candidate_class:\n          candidate.candidate_class,\n\n        case_id:\n          candidate.case_id,\n\n        correlation_id:\n          candidate.correlation_id,\n\n        payload: {\n          ...basePayload,\n\n          submission_id:\n            candidate.submission_id,\n        },\n      },\n    };\n  }\n\n  if (\n    candidate.candidate_class ===\n    'missing_initial_client_data_dispatch'\n  ) {\n    if (\n      candidate.destination_workflow !==\n        'WF02' ||\n      candidate.request_cycle_key !==\n        'initial'\n    ) {\n      return integrityFailure(\n        'invalid_initial_client_data_gap',\n      );\n    }\n\n    return {\n      json: {\n        dispatch_kind: 'state_gap',\n        dispatch_status: 'ready',\n        integrity_failure: false,\n\n        destination_workflow: 'WF02',\n\n        candidate_source:\n          candidate.candidate_source,\n\n        candidate_class:\n          candidate.candidate_class,\n\n        case_id:\n          candidate.case_id,\n\n        correlation_id:\n          candidate.correlation_id,\n\n        payload: {\n          ...basePayload,\n\n          request_cycle_key: 'initial',\n        },\n      },\n    };\n  }\n\n  if (\n    candidate.candidate_class ===\n    'missing_correction_dispatch'\n  ) {\n    if (\n      candidate.destination_workflow !==\n      'WF02'\n    ) {\n      return integrityFailure(\n        'destination_mapping_mismatch',\n      );\n    }\n\n    const failedSubmissionCheck =\n      requireUuid(\n        candidate.failed_submission_id,\n        'failed_submission_id',\n      );\n\n    if (!failedSubmissionCheck.valid) {\n      return integrityFailure(\n        failedSubmissionCheck.errorCode,\n      );\n    }\n\n    const expectedCycleKey =\n      `validation_failed:${candidate.failed_submission_id}`;\n\n    if (\n      candidate.request_cycle_key !==\n      expectedCycleKey\n    ) {\n      return integrityFailure(\n        'request_cycle_key_mismatch',\n      );\n    }\n\n    return {\n      json: {\n        dispatch_kind: 'state_gap',\n        dispatch_status: 'ready',\n        integrity_failure: false,\n\n        destination_workflow: 'WF02',\n\n        candidate_source:\n          candidate.candidate_source,\n\n        candidate_class:\n          candidate.candidate_class,\n\n        case_id:\n          candidate.case_id,\n\n        correlation_id:\n          candidate.correlation_id,\n\n        payload: {\n          ...basePayload,\n\n          request_cycle_key:\n            candidate.request_cycle_key,\n\n          failed_submission_id:\n            candidate.failed_submission_id,\n        },\n      },\n    };\n  }\n\n  const fixedStateGapDestinations = {\n    missing_approval_dispatch: 'WF04',\n    missing_provisioning_dispatch: 'WF05',\n    missing_finalization_dispatch: 'WF06',\n    resume_finalization: 'WF06',\n    complete_finalization: 'WF06',\n  };\n\n  const expectedDestination =\n    fixedStateGapDestinations[\n      candidate.candidate_class\n    ];\n\n  if (!expectedDestination) {\n    return integrityFailure(\n      'unknown_state_gap_type',\n    );\n  }\n\n  if (\n    candidate.destination_workflow !==\n    expectedDestination\n  ) {\n    return integrityFailure(\n      'destination_mapping_mismatch',\n    );\n  }\n\n  return {\n    json: {\n      dispatch_kind: 'state_gap',\n      dispatch_status: 'ready',\n      integrity_failure: false,\n\n      destination_workflow:\n        expectedDestination,\n\n      candidate_source:\n        candidate.candidate_source,\n\n      candidate_class:\n        candidate.candidate_class,\n\n      case_id:\n        candidate.case_id,\n\n      correlation_id:\n        candidate.correlation_id,\n\n      payload: basePayload,\n    },\n  };\n}\n\nreturn integrityFailure(\n  'unknown_candidate_source',\n);"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        80,
+        -160
+      ],
+      "id": "5a96b53f-8676-42d1-8aa9-0fddd3317cd6",
+      "name": "Prepare Dispatch"
+    },
+    {
+      "parameters": {
+        "rules": {
+          "values": [
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 3
+                },
+                "conditions": [
+                  {
+                    "leftValue": "={{ $json.destination_workflow }}",
+                    "rightValue": "WF02",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    },
+                    "id": "95defe1e-84f2-43bd-ac29-0bc675fe10b5"
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "WF02"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 3
+                },
+                "conditions": [
+                  {
+                    "id": "a159b002-2fd7-41d9-8e01-d498d6ef4873",
+                    "leftValue": "={{ $json.destination_workflow }}",
+                    "rightValue": "WF03",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals",
+                      "name": "filter.operator.equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "WF03"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 3
+                },
+                "conditions": [
+                  {
+                    "id": "8b4fe3b3-4526-4a59-b862-75396b0982ca",
+                    "leftValue": "={{ $json.destination_workflow }}",
+                    "rightValue": "WF04",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals",
+                      "name": "filter.operator.equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "WF04"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 3
+                },
+                "conditions": [
+                  {
+                    "id": "e3d55ce7-4220-4228-8ff0-c9c97dafdb68",
+                    "leftValue": "={{ $json.destination_workflow }}",
+                    "rightValue": "WF05",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals",
+                      "name": "filter.operator.equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "WF05"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 3
+                },
+                "conditions": [
+                  {
+                    "id": "7692081d-e0cb-4911-a763-19e0745fb355",
+                    "leftValue": "={{ $json.destination_workflow }}",
+                    "rightValue": "WF06",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals",
+                      "name": "filter.operator.equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "WF06"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 3
+                },
+                "conditions": [
+                  {
+                    "id": "dc5ab3ac-0d8f-4372-b59c-4cbbae2cfd4b",
+                    "leftValue": "={{ $json.destination_workflow }}",
+                    "rightValue": "WF99",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals",
+                      "name": "filter.operator.equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "WF99"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 3.4,
+      "position": [
+        528,
+        -64
+      ],
+      "id": "8cd0069d-2a5b-43bc-ae0f-76962691a3ab",
+      "name": "Route Destination"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Build a sanitized WF98 summary when no candidates were selected.\n\nfunction readBoundedInteger(name, fallback) {\n  const rawValue = $env[name];\n\n  const value =\n    rawValue === null ||\n    rawValue === undefined ||\n    String(rawValue).trim() === ''\n      ? fallback\n      : Number(rawValue);\n\n  if (\n    !Number.isInteger(value) ||\n    value < 1 ||\n    value > 200\n  ) {\n    throw new Error(\n      `${name} must be an integer between 1 and 200`,\n    );\n  }\n\n  return value;\n}\n\nconst batchSize = readBoundedInteger(\n  'WF98_BATCH_SIZE',\n  50,\n);\n\nconst maxDispatchesPerRun = readBoundedInteger(\n  'WF98_MAX_DISPATCHES_PER_RUN',\n  50,\n);\n\nconst startedAt =\n  $execution.startedAt instanceof Date\n    ? $execution.startedAt.toISOString()\n    : new Date(\n        $execution.startedAt ?? Date.now(),\n      ).toISOString();\n\nreturn [\n  {\n    json: {\n      workflow: 'WF98',\n      result: 'completed',\n\n      selected_count: 0,\n      dispatch_accepted_count: 0,\n      dispatch_failed_count: 0,\n      integrity_failure_count: 0,\n\n      batch_limit: Math.min(\n        batchSize,\n        maxDispatchesPerRun,\n      ),\n\n      started_at: startedAt,\n      finished_at: new Date().toISOString(),\n    },\n  },\n];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        80,
+        96
+      ],
+      "id": "efe6e6e1-340b-46ff-8ef2-b5e813fe2cb4",
+      "name": "Build Empty Run Summary"
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "// Pass only the validated payload to WF02.\n// Internal WF98 routing fields must not leave this workflow.\n\nconst payload = $json.payload;\n\nif (\n  payload === null ||\n  typeof payload !== 'object' ||\n  Array.isArray(payload)\n) {\n  throw new Error(\n    'WF98 dispatch payload for WF02 must be a JSON object',\n  );\n}\n\nreturn {\n  json: payload,\n};"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        688,
+        -432
+      ],
+      "id": "3333aae8-aaa3-4cc9-a947-e6116fed9aaf",
+      "name": "Build WF02 Input"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Pass only the validated payload to the destination workflow.\n// Internal WF98 routing fields must not leave WF98.\n\nconst payload = $json.payload;\n\nif (\n  payload === null ||\n  typeof payload !== 'object' ||\n  Array.isArray(payload)\n) {\n  throw new Error(\n    'WF98 dispatch payload must be a JSON object',\n  );\n}\n\nreturn {\n  json: payload,\n};"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        816,
+        -320
+      ],
+      "id": "7d02fd1a-ced6-40d8-b610-95b3c2c2b106",
+      "name": "Build WF03 Input"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Pass only the validated payload to the destination workflow.\n// Internal WF98 routing fields must not leave WF98.\n\nconst payload = $json.payload;\n\nif (\n  payload === null ||\n  typeof payload !== 'object' ||\n  Array.isArray(payload)\n) {\n  throw new Error(\n    'WF98 dispatch payload must be a JSON object',\n  );\n}\n\nreturn {\n  json: payload,\n};"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        816,
+        -160
+      ],
+      "id": "185c7927-b599-4000-a34c-338a62ce11bc",
+      "name": "Build WF04 Input"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Pass only the validated payload to the destination workflow.\n// Internal WF98 routing fields must not leave WF98.\n\nconst payload = $json.payload;\n\nif (\n  payload === null ||\n  typeof payload !== 'object' ||\n  Array.isArray(payload)\n) {\n  throw new Error(\n    'WF98 dispatch payload must be a JSON object',\n  );\n}\n\nreturn {\n  json: payload,\n};"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        832,
+        16
+      ],
+      "id": "978de648-5e9b-4cd0-9368-e1e4b331c55f",
+      "name": "Build WF05 Input"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Pass only the validated payload to the destination workflow.\n// Internal WF98 routing fields must not leave WF98.\n\nconst payload = $json.payload;\n\nif (\n  payload === null ||\n  typeof payload !== 'object' ||\n  Array.isArray(payload)\n) {\n  throw new Error(\n    'WF98 dispatch payload must be a JSON object',\n  );\n}\n\nreturn {\n  json: payload,\n};"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        832,
+        176
+      ],
+      "id": "cec49fed-74bb-4cd9-bd22-0852a3f83f5f",
+      "name": "Build WF06 Input"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Pass only the validated payload to the destination workflow.\n// Internal WF98 routing fields must not leave WF98.\n\nconst payload = $json.payload;\n\nif (\n  payload === null ||\n  typeof payload !== 'object' ||\n  Array.isArray(payload)\n) {\n  throw new Error(\n    'WF98 dispatch payload must be a JSON object',\n  );\n}\n\nreturn {\n  json: payload,\n};"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        704,
+        304
+      ],
+      "id": "766d64f7-07b6-4b57-b255-21607366ac06",
+      "name": "Build WF99 Input"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://n8n-main:5678/webhook/internal/wf02-retry-dispatch",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ $json }}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.3,
+      "position": [
+        1136,
+        -544
+      ],
+      "id": "cd553ab8-84a5-43fe-9d1a-35a709d02e0b",
+      "name": "Dispatch WF02",
+      "alwaysOutputData": false,
+      "onError": "continueErrorOutput",
+      "credentials": {
+        "httpHeaderAuth": {
+          "name": "Header Auth account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://n8n-main:5678/webhook/internal/wf03-retry-dispatch",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ $json }}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.3,
+      "position": [
+        1136,
+        -352
+      ],
+      "id": "382b721a-082a-4de9-ab33-267a311d9a59",
+      "name": "Dispatch WF03",
+      "alwaysOutputData": false,
+      "onError": "continueErrorOutput",
+      "credentials": {
+        "httpHeaderAuth": {
+          "name": "Header Auth account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://n8n-main:5678/webhook/internal/wf04-retry-dispatch",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ $json }}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.3,
+      "position": [
+        1136,
+        -160
+      ],
+      "id": "8acd3826-f324-4703-b797-0c6927507f22",
+      "name": "Dispatch WF04",
+      "alwaysOutputData": false,
+      "onError": "continueErrorOutput",
+      "credentials": {
+        "httpHeaderAuth": {
+          "name": "Header Auth account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://n8n-main:5678/webhook/internal/wf05-retry-dispatch",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ $json }}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.3,
+      "position": [
+        1152,
+        16
+      ],
+      "id": "c20e1bef-c0d1-4fd2-bdb1-5065b4a9f6fe",
+      "name": "Dispatch WF05",
+      "alwaysOutputData": false,
+      "onError": "continueErrorOutput",
+      "credentials": {
+        "httpHeaderAuth": {
+          "name": "Header Auth account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://n8n-main:5678/webhook/internal/wf06-retry-dispatch",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ $json }}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.3,
+      "position": [
+        1152,
+        192
+      ],
+      "id": "ead3dc37-04a9-4875-9ae4-aabb9cbf59e7",
+      "name": "Dispatch WF06",
+      "alwaysOutputData": false,
+      "onError": "continueErrorOutput",
+      "credentials": {
+        "httpHeaderAuth": {
+          "name": "Header Auth account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://n8n-main:5678/webhook/internal/wf99-retry-dispatch",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ $json }}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.3,
+      "position": [
+        1152,
+        400
+      ],
+      "id": "56b71cd9-8cce-46b4-84c3-94e36b08676d",
+      "name": "Dispatch WF99",
+      "alwaysOutputData": true,
+      "onError": "continueErrorOutput",
+      "credentials": {
+        "httpHeaderAuth": {
+          "name": "Header Auth account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "options": {}
+      },
+      "type": "n8n-nodes-base.splitInBatches",
+      "typeVersion": 3,
+      "position": [
+        256,
+        -32
+      ],
+      "id": "c277206e-15a8-4308-b0c8-437700d6a075",
+      "name": "Loop Over Dispatch Candidates"
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "8beac59e-6bc8-4eea-b25a-7dbc859dcc10",
+              "name": "dispatch_outcome",
+              "value": "accepted",
+              "type": "string"
+            },
+            {
+              "id": "93a522d9-fdf5-4e8b-89f9-6ce0161c7bf6",
+              "name": "integrity_failure",
+              "value": "={{ $('Prepare Dispatch').item.json.integrity_failure === true }}",
+              "type": "boolean"
+            }
+          ]
+        },
+        "includeOtherFields": true,
+        "options": {}
+      },
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        1824,
+        -240
+      ],
+      "id": "95c99f78-ad32-4c3b-b7d7-6ee5dceaa93f",
+      "name": "Mark Dispatch Accepted",
+      "alwaysOutputData": true
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "74852e34-9e10-45e1-b617-864f6cd0687d",
+              "name": "dispatch_outcome",
+              "value": "failed",
+              "type": "string"
+            },
+            {
+              "id": "94e28f94-025a-42fa-9959-70b833cad6f4",
+              "name": "integrity_failure",
+              "value": "={{ $('Prepare Dispatch').item.json.integrity_failure === true }}",
+              "type": "boolean"
+            }
+          ]
+        },
+        "includeOtherFields": true,
+        "options": {}
+      },
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        1840,
+        32
+      ],
+      "id": "140d1114-4610-4711-a1b7-aebfdec48a43",
+      "name": "Mark Dispatch Failed"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Build one sanitized WF98 summary after all dispatch attempts finish.\n\nfunction readBoundedInteger(name, fallback) {\n  const rawValue = $env[name];\n\n  const value =\n    rawValue === null ||\n    rawValue === undefined ||\n    String(rawValue).trim() === ''\n      ? fallback\n      : Number(rawValue);\n\n  if (\n    !Number.isInteger(value) ||\n    value < 1 ||\n    value > 200\n  ) {\n    throw new Error(\n      `${name} must be an integer between 1 and 200`,\n    );\n  }\n\n  return value;\n}\n\nconst items = $input.all();\n\nconst selectedCount = items.length;\n\nconst dispatchAcceptedCount = items.filter(\n  (item) =>\n    item.json?.dispatch_outcome === 'accepted',\n).length;\n\nconst dispatchFailedCount = items.filter(\n  (item) =>\n    item.json?.dispatch_outcome === 'failed',\n).length;\n\nconst classifiedCount =\n  dispatchAcceptedCount + dispatchFailedCount;\n\nif (classifiedCount !== selectedCount) {\n  throw new Error(\n    `WF98 summary expected ${selectedCount} classified dispatch results, received ${classifiedCount}`,\n  );\n}\n\nconst integrityFailureCount = items.filter(\n  (item) =>\n    item.json?.integrity_failure === true,\n).length;\n\nconst batchSize = readBoundedInteger(\n  'WF98_BATCH_SIZE',\n  50,\n);\n\nconst maxDispatchesPerRun = readBoundedInteger(\n  'WF98_MAX_DISPATCHES_PER_RUN',\n  50,\n);\n\nconst startedAt =\n  $execution.startedAt instanceof Date\n    ? $execution.startedAt.toISOString()\n    : new Date(\n        $execution.startedAt ?? Date.now(),\n      ).toISOString();\n\nreturn [\n  {\n    json: {\n      workflow: 'WF98',\n      result: 'completed',\n\n      selected_count: selectedCount,\n      dispatch_accepted_count:\n        dispatchAcceptedCount,\n      dispatch_failed_count:\n        dispatchFailedCount,\n      integrity_failure_count:\n        integrityFailureCount,\n\n      batch_limit: Math.min(\n        batchSize,\n        maxDispatchesPerRun,\n      ),\n\n      started_at: startedAt,\n      finished_at: new Date().toISOString(),\n    },\n  },\n];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        848,
+        -720
+      ],
+      "id": "b730abf0-ae21-40d9-8de7-801273d899ac",
+      "name": "Build Run Summary",
+      "alwaysOutputData": false
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Schedule Trigger": {
+      "main": [
+        [
+          {
+            "node": "Validate WF98 Configuration",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Validate WF98 Configuration": {
+      "main": [
+        [
+          {
+            "node": "Select WF98 Candidates",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Select WF98 Candidates": {
+      "main": [
+        [
+          {
+            "node": "Candidates Found?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Candidates Found?": {
+      "main": [
+        [
+          {
+            "node": "Prepare Dispatch",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Build Empty Run Summary",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare Dispatch": {
+      "main": [
+        [
+          {
+            "node": "Loop Over Dispatch Candidates",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Route Destination": {
+      "main": [
+        [
+          {
+            "node": "Build WF02 Input",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Build WF03 Input",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Build WF04 Input",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Build WF05 Input",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Build WF06 Input",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Build WF99 Input",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build WF02 Input": {
+      "main": [
+        [
+          {
+            "node": "Dispatch WF02",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build WF03 Input": {
+      "main": [
+        [
+          {
+            "node": "Dispatch WF03",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build WF04 Input": {
+      "main": [
+        [
+          {
+            "node": "Dispatch WF04",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build WF05 Input": {
+      "main": [
+        [
+          {
+            "node": "Dispatch WF05",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build WF06 Input": {
+      "main": [
+        [
+          {
+            "node": "Dispatch WF06",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build WF99 Input": {
+      "main": [
+        [
+          {
+            "node": "Dispatch WF99",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Loop Over Dispatch Candidates": {
+      "main": [
+        [
+          {
+            "node": "Build Run Summary",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Route Destination",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Dispatch WF02": {
+      "main": [
+        [
+          {
+            "node": "Mark Dispatch Accepted",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Mark Dispatch Failed",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Dispatch WF03": {
+      "main": [
+        [
+          {
+            "node": "Mark Dispatch Accepted",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Mark Dispatch Failed",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Dispatch WF04": {
+      "main": [
+        [
+          {
+            "node": "Mark Dispatch Accepted",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Mark Dispatch Failed",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Dispatch WF05": {
+      "main": [
+        [
+          {
+            "node": "Mark Dispatch Accepted",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Mark Dispatch Failed",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Dispatch WF99": {
+      "main": [
+        [
+          {
+            "node": "Mark Dispatch Accepted",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Mark Dispatch Failed",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Mark Dispatch Accepted": {
+      "main": [
+        [
+          {
+            "node": "Loop Over Dispatch Candidates",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Mark Dispatch Failed": {
+      "main": [
+        [
+          {
+            "node": "Loop Over Dispatch Candidates",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Dispatch WF06": {
+      "main": [
+        [
+          {
+            "node": "Mark Dispatch Accepted",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Mark Dispatch Failed",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate",
+    "availableInMCP": false,
+    "timeSavedMode": "fixed",
+    "errorWorkflow": "WykBM7mvCOqph91a",
+    "callerPolicy": "workflowsFromSameOwner"
+  },
+  "versionId": "a2155cb2-c950-4697-9e37-9ebe268657e3",
+  "meta": {
+    "templateCredsSetupCompleted": true,
+    "instanceId": "72249f432a77256c34affd74b688f3209ef91628f0f09e01d73ae5bb45f3c5f3"
+  },
+  "nodeGroups": [],
+  "id": "o5coDcd0qjFSgjA5",
+  "tags": []
+}
