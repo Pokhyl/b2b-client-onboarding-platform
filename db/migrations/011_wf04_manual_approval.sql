@@ -129,7 +129,7 @@ BEGIN
 
     IF v_recipient_email = ''
         OR v_recipient_email !~
-            '^[A-Z0-9._%+\-]+@[A-Z0-9.\-]+\.[A-Z]{2,}$'::text
+            '^[a-z0-9._%+\-]+@[a-z0-9.\-]+\.[a-z]{2,}$'::text
                 COLLATE "C"
     THEN
         RAISE EXCEPTION
