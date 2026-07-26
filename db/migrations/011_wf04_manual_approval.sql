@@ -61,6 +61,7 @@ DECLARE
     v_idempotency_key text;
     v_lease_owner text;
     v_request_summary jsonb;
+    v_recover_expired_wait boolean := false;
 BEGIN
     IF p_case_id IS NULL
         OR p_correlation_id IS NULL
@@ -486,13 +487,43 @@ BEGIN
 
             approval_step_status :=
                 step_row.status;
+
+            RETURN NEXT;
+            RETURN;
+
+        ELSIF FOUND
+            AND p_trigger_source = 'wf98'
+            AND p_external_operation_id =
+                existing_operation_row.id
+            AND existing_operation_row.operation_type =
+                'send_approval_request'
+            AND existing_operation_row.case_id =
+                case_row.id
+            AND existing_operation_row.status =
+                'in_progress'
+            AND existing_operation_row.lease_owner =
+                'WF04:'
+                || step_row.n8n_wait_execution_id
+            AND existing_operation_row.lease_expires_at <=
+                v_now
+            AND existing_operation_row.request_summary =
+                v_request_summary
+            AND lower(
+                    btrim(
+                        step_row.approval_recipient_email
+                    )
+                ) = v_recipient_email
+        THEN
+            v_recover_expired_wait :=
+                true;
+
         ELSE
             preparation_outcome :=
                 'inconsistent_active_wait';
-        END IF;
 
-        RETURN NEXT;
-        RETURN;
+            RETURN NEXT;
+            RETURN;
+        END IF;
     END IF;
 
     IF step_row.status = 'completed' THEN
@@ -514,7 +545,9 @@ BEGIN
     IF step_row.status NOT IN (
         'pending',
         'failed_retryable'
-    ) THEN
+    )
+        AND NOT v_recover_expired_wait
+    THEN
         preparation_outcome :=
             'invalid_approval_step_status';
 

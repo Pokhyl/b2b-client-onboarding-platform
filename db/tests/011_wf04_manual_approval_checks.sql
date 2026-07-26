@@ -738,4 +738,127 @@ BEGIN
 END;
 $$;
 
+
+DO $$
+DECLARE
+    v_case_id uuid;
+    v_correlation_id uuid;
+    v_submission_id uuid;
+    v_client_id uuid;
+
+    v_prepare record;
+    v_recovered record;
+
+    v_step_status text;
+    v_stored_execution_id text;
+    v_operation_status text;
+    v_operation_attempt_count integer;
+    v_operation_lease_owner text;
+BEGIN
+    SELECT fixture.*
+    INTO
+        v_case_id,
+        v_correlation_id,
+        v_submission_id,
+        v_client_id
+    FROM pg_temp.create_wf04_test_case(
+        'expired-wait'
+    ) AS fixture;
+
+    SELECT result.*
+    INTO STRICT v_prepare
+    FROM prepare_wf04_approval_request(
+        v_case_id,
+        v_correlation_id,
+        'wf03',
+        v_submission_id,
+        v_client_id,
+        NULL,
+        NULL,
+        'wf04-expired-execution-1',
+        'operator@example.com',
+        'manual_approval_v1',
+        'b2b-approval-eeeeeeeeeeeeeeeeeeeeeeee',
+        168,
+        608400,
+        3
+    ) AS result;
+
+    UPDATE external_operations
+    SET lease_expires_at =
+        clock_timestamp() - interval '1 second'
+    WHERE id = v_prepare.operation_id;
+
+    SELECT result.*
+    INTO STRICT v_recovered
+    FROM prepare_wf04_approval_request(
+        v_case_id,
+        v_correlation_id,
+        'wf98',
+        NULL,
+        NULL,
+        v_prepare.operation_id,
+        NULL,
+        'wf04-expired-execution-2',
+        'operator@example.com',
+        'manual_approval_v1',
+        'b2b-approval-eeeeeeeeeeeeeeeeeeeeeeee',
+        168,
+        608400,
+        3
+    ) AS result;
+
+    IF v_recovered.preparation_outcome
+            IS DISTINCT FROM 'ready_to_send'
+        OR v_recovered.operation_claim_outcome
+            IS DISTINCT FROM 'claimed'
+        OR v_recovered.operation_attempt_count
+            IS DISTINCT FROM 2
+        OR v_recovered.waiting_execution_id
+            IS DISTINCT FROM 'wf04-expired-execution-2'
+    THEN
+        RAISE EXCEPTION
+            'Expired WF04 wait was not reclaimed: %',
+            row_to_json(v_recovered);
+    END IF;
+
+    SELECT
+        step.status,
+        step.n8n_wait_execution_id
+    INTO STRICT
+        v_step_status,
+        v_stored_execution_id
+    FROM onboarding_steps AS step
+    WHERE step.case_id = v_case_id
+      AND step.step_type = 'manual_approval';
+
+    SELECT
+        operation.status,
+        operation.attempt_count,
+        operation.lease_owner
+    INTO STRICT
+        v_operation_status,
+        v_operation_attempt_count,
+        v_operation_lease_owner
+    FROM external_operations AS operation
+    WHERE operation.id = v_prepare.operation_id;
+
+    IF v_step_status <> 'waiting'
+        OR v_stored_execution_id
+            IS DISTINCT FROM 'wf04-expired-execution-2'
+        OR v_operation_status <> 'in_progress'
+        OR v_operation_attempt_count <> 2
+        OR v_operation_lease_owner
+            IS DISTINCT FROM
+                'WF04:wf04-expired-execution-2'
+    THEN
+        RAISE EXCEPTION
+            'Expired WF04 wait recovery persisted inconsistent state';
+    END IF;
+
+    RAISE NOTICE
+        'PASS: WF04 expired active wait is atomically reclaimed';
+END;
+$$;
+
 ROLLBACK;
