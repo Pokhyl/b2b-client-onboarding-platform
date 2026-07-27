@@ -1,10 +1,10 @@
 {
-  "updatedAt": "2026-07-27T15:17:29.387Z",
+  "updatedAt": "2026-07-27T16:27:46.177Z",
   "createdAt": "2026-07-19T17:57:15.410Z",
   "id": "I6nqXCOFa3qycHtY",
   "name": "WF04 - Manual Approval",
   "description": null,
-  "active": true,
+  "active": false,
   "isArchived": false,
   "nodes": [
     {
@@ -302,13 +302,13 @@
     {
       "parameters": {
         "mode": "runOnceForEachItem",
-        "jsCode": "// Classify the Gmail send-and-wait result while preserving\n// the authoritative approval-operation context.\n\nconst input = $json ?? {};\n\nconst UUID_PATTERN =\n  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;\n\nfunction optionalText(value, maximumLength = 1000) {\n  if (\n    value === null ||\n    value === undefined\n  ) {\n    return null;\n  }\n\n  const normalized = String(value)\n    .replace(\n      /[\\u0000-\\u0008\\u000B\\u000C\\u000E-\\u001F\\u007F]/g,\n      ' ',\n    )\n    .replace(/\\s+/g, ' ')\n    .trim();\n\n  return normalized === ''\n    ? null\n    : normalized.slice(0, maximumLength);\n}\n\nfunction optionalUuid(value) {\n  const normalized =\n    optionalText(value, 36);\n\n  return (\n    normalized !== null &&\n    UUID_PATTERN.test(normalized)\n  )\n    ? normalized.toLowerCase()\n    : null;\n}\n\nfunction optionalInteger(value) {\n  const normalized = Number(value);\n\n  return Number.isInteger(normalized)\n    ? normalized\n    : null;\n}\n\nfunction extractErrorMessage(value) {\n  if (typeof value === 'string') {\n    return optionalText(value);\n  }\n\n  if (\n    value !== null &&\n    typeof value === 'object' &&\n    !Array.isArray(value)\n  ) {\n    return optionalText(\n      value.message ??\n      value.description ??\n      value.error ??\n      JSON.stringify(value),\n    );\n  }\n\n  return null;\n}\n\nconst waitingExecutionId =\n  optionalText(\n    $execution.id,\n    200,\n  );\n\nif (waitingExecutionId === null) {\n  throw new Error(\n    'Current n8n execution ID is unavailable',\n  );\n}\n\nconst approved =\n  typeof input?.data?.approved === 'boolean'\n    ? input.data.approved\n    : typeof input.approved === 'boolean'\n      ? input.approved\n      : typeof input?.response?.approved === 'boolean'\n        ? input.response.approved\n        : null;\n\nconst providerError =\n  extractErrorMessage(\n    input.error,\n  ) ??\n  (\n    input.name === 'NodeApiError' ||\n    input.name === 'NodeOperationError'\n      ? extractErrorMessage(input)\n      : null\n  );\n\nconst commonResult = {\n  workflow:\n    'WF04',\n\n  waiting_execution_id:\n    waitingExecutionId,\n\n  lease_owner:\n    `WF04:${waitingExecutionId}`,\n\n  case_id:\n    optionalUuid(input.case_id),\n\n  correlation_id:\n    optionalUuid(input.correlation_id),\n\n  approval_step_id:\n    optionalUuid(input.approval_step_id),\n\n  accepted_submission_id:\n    optionalUuid(input.accepted_submission_id),\n\n  client_id:\n    optionalUuid(input.client_id),\n\n  operation_id:\n    optionalUuid(input.operation_id),\n\n  recipient_email:\n    optionalText(\n      input.recipient_email ??\n      input.approval_recipient,\n      320,\n    ),\n\n  operation_attempt_count:\n    optionalInteger(\n      input.operation_attempt_count,\n    ),\n\n  operation_max_attempts:\n    optionalInteger(\n      input.operation_max_attempts ??\n      input.max_attempts,\n    ),\n};\n\nif (approved !== null) {\n  return {\n    json: {\n      ...commonResult,\n\n      approval_wait_outcome:\n        'response_received',\n\n      decision:\n        approved\n          ? 'approved'\n          : 'rejected',\n\n      responded_at:\n        new Date().toISOString(),\n\n      gmail_message_id:\n        optionalText(\n          input?.data?.messageId ??\n          input?.data?.message_id ??\n          input?.messageId ??\n          input?.message_id,\n          500,\n        ),\n\n      gmail_thread_id:\n        optionalText(\n          input?.data?.threadId ??\n          input?.data?.thread_id ??\n          input?.threadId ??\n          input?.thread_id,\n          500,\n        ),\n\n      operator_comment:\n        optionalText(\n          input?.data?.comment ??\n          input?.data?.text ??\n          input?.comment,\n          2000,\n        ),\n\n      response_source:\n        'n8n_send_and_wait',\n    },\n  };\n}\n\nif (providerError !== null) {\n  return {\n    json: {\n      ...commonResult,\n\n      approval_wait_outcome:\n        'gmail_send_failed',\n\n      error_class:\n        'gmail_send_failure',\n\n      error_message:\n        providerError,\n\n      error_details: {\n        provider:\n          'gmail',\n\n        stage:\n          'send_approval_request',\n      },\n    },\n  };\n}\n\nconst timeoutContextValid =\n  input.preparation_decision ===\n    'send_approval_request' &&\n  optionalText(\n    input.waiting_execution_id,\n    200,\n  ) === waitingExecutionId &&\n  commonResult.case_id !== null &&\n  commonResult.operation_id !== null &&\n  commonResult.recipient_email !== null;\n\nif (timeoutContextValid) {\n  return {\n    json: {\n      ...commonResult,\n\n      approval_wait_outcome:\n        'approval_response_timeout',\n\n      error_class:\n        'approval_response_timeout',\n\n      error_message:\n        'No approval response was received before the configured deadline.',\n\n      error_details: {\n        provider:\n          'gmail',\n\n        stage:\n          'wait_for_approval',\n\n        timeout_hours:\n          Number(\n            input.response_timeout_hours,\n          ) || null,\n      },\n    },\n  };\n}\n\nreturn {\n  json: {\n    ...commonResult,\n\n    approval_wait_outcome:\n      'invalid_wait_result',\n\n    error_class:\n      'workflow_contract_failure',\n\n    error_message:\n      'WF04 received an unsupported Gmail send-and-wait result.',\n\n    error_details: {\n      provider:\n        'gmail',\n\n      stage:\n        'send_and_wait_result_classification',\n\n      received_fields:\n        Object.keys(input)\n          .slice(0, 50),\n    },\n  },\n};"
+        "jsCode": "// Classify the direct Gmail send-and-wait result.\n// Authoritative case and operation context is restored later\n// from PostgreSQL by the current n8n execution ID.\n\nconst input = $json ?? {};\n\nfunction optionalText(\n  value,\n  maximumLength = 1000,\n) {\n  if (\n    value === null ||\n    value === undefined\n  ) {\n    return null;\n  }\n\n  const normalized = String(value)\n    .replace(\n      /[\\u0000-\\u0008\\u000B\\u000C\\u000E-\\u001F\\u007F]/g,\n      ' ',\n    )\n    .replace(/\\s+/g, ' ')\n    .trim();\n\n  return normalized === ''\n    ? null\n    : normalized.slice(\n        0,\n        maximumLength,\n      );\n}\n\nfunction extractErrorMessage(value) {\n  if (typeof value === 'string') {\n    return optionalText(value);\n  }\n\n  if (\n    value !== null &&\n    typeof value === 'object' &&\n    !Array.isArray(value)\n  ) {\n    return optionalText(\n      value.message ??\n      value.description ??\n      value.error ??\n      JSON.stringify(value),\n    );\n  }\n\n  return null;\n}\n\nconst waitingExecutionId =\n  optionalText(\n    $execution.id,\n    200,\n  );\n\nif (waitingExecutionId === null) {\n  throw new Error(\n    'Current n8n execution ID is unavailable',\n  );\n}\n\nconst approved =\n  typeof input?.data?.approved ===\n    'boolean'\n    ? input.data.approved\n    : typeof input.approved ===\n        'boolean'\n      ? input.approved\n      : typeof input?.response?.approved ===\n          'boolean'\n        ? input.response.approved\n        : null;\n\nconst providerError =\n  extractErrorMessage(\n    input.error,\n  ) ??\n  (\n    input.name === 'NodeApiError' ||\n    input.name === 'NodeOperationError'\n      ? extractErrorMessage(input)\n      : null\n  );\n\nconst commonResult = {\n  workflow:\n    'WF04',\n\n  waiting_execution_id:\n    waitingExecutionId,\n\n  lease_owner:\n    `WF04:${waitingExecutionId}`,\n};\n\nif (approved !== null) {\n  const respondedAt =\n    optionalText(\n      input?.data?.respondedAt ??\n      input?.data?.responded_at ??\n      input?.respondedAt ??\n      input?.responded_at,\n      100,\n    ) ??\n    new Date().toISOString();\n\n  return {\n    json: {\n      ...commonResult,\n\n      approval_wait_outcome:\n        'response_received',\n\n      decision:\n        approved\n          ? 'approved'\n          : 'rejected',\n\n      responded_at:\n        respondedAt,\n\n      gmail_message_id:\n        optionalText(\n          input?.data?.messageId ??\n          input?.data?.message_id ??\n          input?.messageId ??\n          input?.message_id,\n          500,\n        ),\n\n      gmail_thread_id:\n        optionalText(\n          input?.data?.threadId ??\n          input?.data?.thread_id ??\n          input?.threadId ??\n          input?.thread_id,\n          500,\n        ),\n\n      operator_comment:\n        optionalText(\n          input?.data?.comment ??\n          input?.data?.text ??\n          input?.comment,\n          2000,\n        ),\n\n      response_source:\n        'n8n_send_and_wait',\n    },\n  };\n}\n\nif (providerError !== null) {\n  return {\n    json: {\n      ...commonResult,\n\n      approval_wait_outcome:\n        'gmail_send_failed',\n\n      error_class:\n        'gmail_send_failure',\n\n      error_message:\n        providerError,\n\n      error_details: {\n        provider:\n          'gmail',\n\n        stage:\n          'send_approval_request',\n      },\n    },\n  };\n}\n\n// When the configured wait deadline expires,\n// n8n resumes the node without an approval response.\n// The original node input can be returned in this case.\n\nif (\n  input.preparation_decision ===\n    'send_approval_request'\n) {\n  return {\n    json: {\n      ...commonResult,\n\n      approval_wait_outcome:\n        'approval_response_timeout',\n\n      error_class:\n        'approval_response_timeout',\n\n      error_message:\n        'No approval response was received before the configured deadline.',\n\n      error_details: {\n        provider:\n          'gmail',\n\n        stage:\n          'wait_for_approval',\n\n        timeout_hours:\n          Number(\n            input.response_timeout_hours,\n          ) || null,\n      },\n    },\n  };\n}\n\nreturn {\n  json: {\n    ...commonResult,\n\n    approval_wait_outcome:\n      'invalid_wait_result',\n\n    error_class:\n      'workflow_contract_failure',\n\n    error_message:\n      'WF04 received an unsupported Gmail send-and-wait result.',\n\n    error_details: {\n      provider:\n        'gmail',\n\n      stage:\n        'send_and_wait_result_classification',\n\n      received_fields:\n        Object.keys(input)\n          .slice(0, 50),\n    },\n  },\n};"
       },
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
       "position": [
-        -80,
-        -432
+        -224,
+        -272
       ],
       "id": "61964bae-0456-402d-b90d-3b82c0a496f2",
       "name": "Normalize Approval Response"
@@ -656,38 +656,8 @@
     },
     {
       "parameters": {
-        "mode": "combine",
-        "combineBy": "combineByPosition",
-        "options": {}
-      },
-      "type": "n8n-nodes-base.merge",
-      "typeVersion": 3.2,
-      "position": [
-        -480,
-        -512
-      ],
-      "id": "cb02ec5a-7b71-4999-b55f-41d871a0e86c",
-      "name": "Merge Approval Response Context"
-    },
-    {
-      "parameters": {
-        "mode": "combine",
-        "combineBy": "combineByPosition",
-        "options": {}
-      },
-      "type": "n8n-nodes-base.merge",
-      "typeVersion": 3.2,
-      "position": [
-        -384,
-        -320
-      ],
-      "id": "ca7e8d9b-b40d-40e3-8430-9f3b2fcb27aa",
-      "name": "Merge Approval Failure Context"
-    },
-    {
-      "parameters": {
         "mode": "runOnceForEachItem",
-        "jsCode": "// Prepare the authoritative failure-finalization input\n// for approval timeout, Gmail send failure, or invalid wait output.\n\nconst input = $json ?? {};\n\nconst UUID_PATTERN =\n  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;\n\nfunction requireText(value, fieldName, maximumLength = 1000) {\n  const normalized =\n    String(value ?? '').trim();\n\n  if (normalized === '') {\n    throw new Error(\n      `${fieldName} must not be blank`,\n    );\n  }\n\n  if (normalized.length > maximumLength) {\n    throw new Error(\n      `${fieldName} exceeds ${maximumLength} characters`,\n    );\n  }\n\n  return normalized;\n}\n\nfunction optionalText(value, maximumLength = 1000) {\n  if (\n    value === null ||\n    value === undefined\n  ) {\n    return null;\n  }\n\n  const normalized =\n    String(value).trim();\n\n  return normalized === ''\n    ? null\n    : normalized.slice(0, maximumLength);\n}\n\nfunction requireUuid(value, fieldName) {\n  const normalized =\n    requireText(value, fieldName, 36)\n      .toLowerCase();\n\n  if (!UUID_PATTERN.test(normalized)) {\n    throw new Error(\n      `${fieldName} must be a valid UUID`,\n    );\n  }\n\n  return normalized;\n}\n\nfunction optionalUuid(value) {\n  const normalized =\n    optionalText(value, 36);\n\n  return (\n    normalized !== null &&\n    UUID_PATTERN.test(normalized)\n  )\n    ? normalized.toLowerCase()\n    : null;\n}\n\nfunction optionalInteger(value) {\n  const normalized = Number(value);\n\n  return Number.isInteger(normalized)\n    ? normalized\n    : null;\n}\n\nconst outcome =\n  requireText(\n    input.approval_wait_outcome ??\n      'invalid_wait_result',\n    'approval_wait_outcome',\n    100,\n  );\n\nif (outcome === 'response_received') {\n  throw new Error(\n    'Approval responses must not enter failure finalization',\n  );\n}\n\nconst caseId =\n  requireUuid(\n    input.case_id,\n    'case_id',\n  );\n\nconst operationId =\n  requireUuid(\n    input.operation_id,\n    'operation_id',\n  );\n\nconst waitingExecutionId =\n  requireText(\n    input.waiting_execution_id,\n    'waiting_execution_id',\n    200,\n  );\n\nconst recipientEmail =\n  requireText(\n    input.recipient_email,\n    'recipient_email',\n    320,\n  ).toLowerCase();\n\nconst attemptCount =\n  optionalInteger(\n    input.operation_attempt_count,\n  );\n\nconst maxAttempts =\n  optionalInteger(\n    input.operation_max_attempts,\n  );\n\nconst retryable =\n  outcome === 'gmail_send_failed' &&\n  attemptCount !== null &&\n  maxAttempts !== null &&\n  attemptCount < maxAttempts;\n\nconst nextRetryAt =\n  retryable\n    ? new Date(\n        Date.now() + 10 * 60 * 1000,\n      ).toISOString()\n    : null;\n\nlet errorClass;\n\nif (outcome === 'approval_response_timeout') {\n  errorClass =\n    'approval_response_timeout';\n} else if (outcome === 'gmail_send_failed') {\n  errorClass =\n    'gmail_send_failure';\n} else {\n  errorClass =\n    'workflow_contract_failure';\n}\n\nreturn {\n  json: {\n    case_id:\n      caseId,\n\n    correlation_id:\n      optionalUuid(\n        input.correlation_id,\n      ),\n\n    approval_step_id:\n      optionalUuid(\n        input.approval_step_id,\n      ),\n\n    accepted_submission_id:\n      optionalUuid(\n        input.accepted_submission_id,\n      ),\n\n    client_id:\n      optionalUuid(\n        input.client_id,\n      ),\n\n    operation_id:\n      operationId,\n\n    waiting_execution_id:\n      waitingExecutionId,\n\n    lease_owner:\n      `WF04:${waitingExecutionId}`,\n\n    recipient_email:\n      recipientEmail,\n\n    approval_wait_outcome:\n      outcome,\n\n    operation_attempt_count:\n      attemptCount,\n\n    operation_max_attempts:\n      maxAttempts,\n\n    retryable,\n\n    error_class:\n      errorClass,\n\n    error_message:\n      requireText(\n        input.error_message ??\n          'WF04 approval wait failed',\n        'error_message',\n        1000,\n      ),\n\n    error_summary: {\n      approval_wait_outcome:\n        outcome,\n\n      error_message:\n        requireText(\n          input.error_message ??\n            'WF04 approval wait failed',\n          'error_message',\n          1000,\n        ),\n\n      provider:\n        input.error_details?.provider ??\n        null,\n\n      stage:\n        input.error_details?.stage ??\n        null,\n\n      operation_attempt_count:\n        attemptCount,\n\n      operation_max_attempts:\n        maxAttempts,\n\n      timeout_hours:\n        input.error_details?.timeout_hours ??\n        null,\n    },\n\n    next_retry_at:\n      nextRetryAt,\n  },\n};"
+        "jsCode": "// Normalize a Gmail wait failure before PostgreSQL\n// restores the authoritative case and operation context.\n\nconst input = $json ?? {};\n\nfunction requireText(\n  value,\n  fieldName,\n  maximumLength = 1000,\n) {\n  const normalized =\n    String(value ?? '').trim();\n\n  if (normalized === '') {\n    throw new Error(\n      `${fieldName} must not be blank`,\n    );\n  }\n\n  if (\n    normalized.length >\n    maximumLength\n  ) {\n    throw new Error(\n      `${fieldName} exceeds ${maximumLength} characters`,\n    );\n  }\n\n  return normalized;\n}\n\nconst outcome =\n  requireText(\n    input.approval_wait_outcome ??\n      'invalid_wait_result',\n    'approval_wait_outcome',\n    100,\n  );\n\nconst allowedOutcomes =\n  new Set([\n    'approval_response_timeout',\n    'gmail_send_failed',\n    'invalid_wait_result',\n  ]);\n\nif (!allowedOutcomes.has(outcome)) {\n  throw new Error(\n    'Approval response must not enter failure finalization',\n  );\n}\n\nconst waitingExecutionId =\n  requireText(\n    input.waiting_execution_id,\n    'waiting_execution_id',\n    200,\n  );\n\nlet errorClass;\n\nif (\n  outcome ===\n  'approval_response_timeout'\n) {\n  errorClass =\n    'approval_response_timeout';\n\n} else if (\n  outcome ===\n  'gmail_send_failed'\n) {\n  errorClass =\n    'gmail_send_failure';\n\n} else {\n  errorClass =\n    'workflow_contract_failure';\n}\n\nconst errorMessage =\n  requireText(\n    input.error_message ??\n      'WF04 approval wait failed',\n    'error_message',\n    1000,\n  );\n\nreturn {\n  json: {\n    waiting_execution_id:\n      waitingExecutionId,\n\n    approval_wait_outcome:\n      outcome,\n\n    error_class:\n      errorClass,\n\n    error_message:\n      errorMessage,\n\n    error_summary: {\n      approval_wait_outcome:\n        outcome,\n\n      error_message:\n        errorMessage,\n\n      provider:\n        input.error_details?.provider ??\n        null,\n\n      stage:\n        input.error_details?.stage ??\n        null,\n\n      timeout_hours:\n        input.error_details?.timeout_hours ??\n        null,\n\n      received_fields:\n        input.error_details?.received_fields ??\n        null,\n    },\n  },\n};"
       },
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
@@ -701,9 +671,9 @@
     {
       "parameters": {
         "operation": "executeQuery",
-        "query": "WITH finalized AS (\n    SELECT *\n    FROM finalize_wf04_approval_failure(\n        $1::uuid,\n        $2::uuid,\n        $3::text,\n        $4::text,\n        $5::text,\n        $6::boolean,\n        $7::text,\n        $8::jsonb,\n        $9::timestamptz\n    )\n)\nSELECT\n    $10::jsonb AS input_context,\n    finalized.*\nFROM finalized;",
+        "query": "WITH failure_input AS (\n    SELECT\n        $1::text AS waiting_execution_id,\n        $2::text AS approval_wait_outcome,\n        $3::text AS error_class,\n        $4::jsonb AS error_summary\n),\nresolved_context AS (\n    SELECT\n        onboarding_case.id\n            AS case_id,\n\n        onboarding_case.correlation_id,\n\n        onboarding_case.accepted_submission_id,\n\n        onboarding_case.client_id,\n\n        approval_step.id\n            AS approval_step_id,\n\n        lower(\n            btrim(\n                approval_step.approval_recipient_email\n            )\n        ) AS recipient_email,\n\n        approval_operation.id\n            AS operation_id,\n\n        approval_operation.attempt_count\n            AS operation_attempt_count,\n\n        approval_operation.max_attempts\n            AS operation_max_attempts,\n\n        'WF04:'\n            || failure_input.waiting_execution_id\n            AS lease_owner\n\n    FROM failure_input\n\n    JOIN onboarding_steps\n        AS approval_step\n      ON approval_step.step_type =\n            'manual_approval'\n     AND approval_step.n8n_wait_execution_id =\n            failure_input.waiting_execution_id\n\n    JOIN onboarding_cases\n        AS onboarding_case\n      ON onboarding_case.id =\n            approval_step.case_id\n\n    JOIN external_operations\n        AS approval_operation\n      ON approval_operation.case_id =\n            onboarding_case.id\n     AND approval_operation.operation_type =\n            'send_approval_request'\n     AND approval_operation.idempotency_key =\n            'onboarding:'\n            || onboarding_case.id::text\n            || ':send-approval-request'\n\n    LIMIT 1\n),\nderived_context AS (\n    SELECT\n        resolved_context.*,\n\n        (\n            failure_input.approval_wait_outcome =\n                'gmail_send_failed'\n            AND\n            resolved_context.operation_attempt_count <\n            resolved_context.operation_max_attempts\n        ) AS retryable,\n\n        CASE\n            WHEN\n                failure_input.approval_wait_outcome =\n                    'gmail_send_failed'\n                AND\n                resolved_context.operation_attempt_count <\n                resolved_context.operation_max_attempts\n            THEN\n                clock_timestamp()\n                + interval '10 minutes'\n            ELSE\n                NULL\n        END AS next_retry_at\n\n    FROM failure_input\n\n    JOIN resolved_context\n      ON true\n),\nfinalized AS (\n    SELECT result.*\n\n    FROM failure_input\n\n    JOIN derived_context\n      ON true\n\n    CROSS JOIN LATERAL\n        finalize_wf04_approval_failure(\n            derived_context.case_id,\n            derived_context.operation_id,\n            derived_context.lease_owner,\n            failure_input.waiting_execution_id,\n            derived_context.recipient_email,\n            derived_context.retryable,\n            failure_input.error_class,\n            failure_input.error_summary,\n            derived_context.next_retry_at\n        ) AS result\n)\nSELECT\n    jsonb_strip_nulls(\n        $5::jsonb\n        ||\n        jsonb_build_object(\n            'context_lookup_outcome',\n            CASE\n                WHEN resolved_context.operation_id\n                    IS NULL\n                THEN\n                    'response_context_not_found'\n                ELSE\n                    'context_resolved'\n            END,\n\n            'case_id',\n            resolved_context.case_id,\n\n            'correlation_id',\n            resolved_context.correlation_id,\n\n            'approval_step_id',\n            resolved_context.approval_step_id,\n\n            'accepted_submission_id',\n            resolved_context.accepted_submission_id,\n\n            'client_id',\n            resolved_context.client_id,\n\n            'operation_id',\n            resolved_context.operation_id,\n\n            'recipient_email',\n            resolved_context.recipient_email,\n\n            'waiting_execution_id',\n            failure_input.waiting_execution_id,\n\n            'lease_owner',\n            resolved_context.lease_owner,\n\n            'operation_attempt_count',\n            resolved_context.operation_attempt_count,\n\n            'operation_max_attempts',\n            resolved_context.operation_max_attempts,\n\n            'retryable',\n            derived_context.retryable,\n\n            'next_retry_at',\n            derived_context.next_retry_at\n        )\n    ) AS input_context,\n\n    finalized.*\n\nFROM failure_input\n\nLEFT JOIN resolved_context\n  ON true\n\nLEFT JOIN derived_context\n  ON true\n\nLEFT JOIN finalized\n  ON true;",
         "options": {
-          "queryReplacement": "={{ [   $json.case_id,   $json.operation_id,   $json.lease_owner,   $json.waiting_execution_id,   $json.recipient_email,   $json.retryable,   $json.error_class,   JSON.stringify($json.error_summary),   $json.next_retry_at,   JSON.stringify($json) ] }}"
+          "queryReplacement": "={{\n[\n  $json.waiting_execution_id,\n  $json.approval_wait_outcome,\n  $json.error_class,\n  JSON.stringify(\n    $json.error_summary\n  ),\n  JSON.stringify(\n    $json\n  )\n]\n}}"
         }
       },
       "type": "n8n-nodes-base.postgres",
@@ -996,16 +966,6 @@
       "main": [
         [
           {
-            "node": "Merge Approval Response Context",
-            "type": "main",
-            "index": 0
-          },
-          {
-            "node": "Merge Approval Failure Context",
-            "type": "main",
-            "index": 0
-          },
-          {
             "node": "Send Approval and Wait",
             "type": "main",
             "index": 0
@@ -1017,16 +977,16 @@
       "main": [
         [
           {
-            "node": "Merge Approval Response Context",
+            "node": "Normalize Approval Response",
             "type": "main",
             "index": 0
           }
         ],
         [
           {
-            "node": "Merge Approval Failure Context",
+            "node": "Normalize Approval Response",
             "type": "main",
-            "index": 1
+            "index": 0
           }
         ]
       ]
@@ -1158,28 +1118,6 @@
         ]
       ]
     },
-    "Merge Approval Response Context": {
-      "main": [
-        [
-          {
-            "node": "Normalize Approval Response",
-            "type": "main",
-            "index": 0
-          }
-        ]
-      ]
-    },
-    "Merge Approval Failure Context": {
-      "main": [
-        [
-          {
-            "node": "Normalize Approval Response",
-            "type": "main",
-            "index": 0
-          }
-        ]
-      ]
-    },
     "Prepare Approval Failure Finalization": {
       "main": [
         [
@@ -1275,9 +1213,9 @@
   },
   "nodeGroups": [],
   "pinData": {},
-  "versionId": "f88b30b2-55d2-46b0-a315-6f62bb0ca080",
-  "activeVersionId": "e43638c6-18ba-41fc-b8a8-5e2ceaf213fe",
-  "versionCounter": 297,
+  "versionId": "7c639d10-21b0-4e13-983c-cfe15ec717a8",
+  "activeVersionId": null,
+  "versionCounter": 305,
   "triggerCount": 1,
   "sourceWorkflowId": null,
   "tags": [],
