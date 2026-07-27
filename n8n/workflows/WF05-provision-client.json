@@ -1,0 +1,438 @@
+{
+  "updatedAt": "2026-07-27T18:36:46.928Z",
+  "createdAt": "2026-07-19T17:57:39.335Z",
+  "id": "1nU3HodQoHZJPuHX",
+  "name": "WF05 - Provision Client",
+  "description": null,
+  "active": false,
+  "isArchived": false,
+  "nodes": [
+    {
+      "parameters": {
+        "inputSource": "passthrough"
+      },
+      "type": "n8n-nodes-base.executeWorkflowTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        -912,
+        80
+      ],
+      "id": "1cd02893-ad8f-4c73-8813-6c1dcd16184b",
+      "name": "Internal Invocation Trigger"
+    },
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "internal/wf05-retry-dispatch",
+        "authentication": "headerAuth",
+        "options": {
+          "responseCode": {
+            "values": {}
+          }
+        }
+      },
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2.1,
+      "position": [
+        -912,
+        -96
+      ],
+      "id": "a07f4c37-2357-4bb2-98a2-fd88bf61eb6b",
+      "name": "Webhook",
+      "webhookId": "0e6c7ad6-c423-4411-8b60-ff292d1bc505",
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "vRGUhlaMi4SARvdN",
+          "name": "Header Auth account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "// Normalize direct WF04/WF98 invocation and protected webhook input\n// into one plain payload object.\n\nconst input = $json ?? {};\n\nconst payload =\n  input.body !== null &&\n  typeof input.body === 'object' &&\n  !Array.isArray(input.body)\n    ? input.body\n    : input;\n\nreturn {\n  json: payload,\n};"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -1248,
+        -160
+      ],
+      "id": "5415ca2c-477d-4520-a706-a07984320283",
+      "name": "Normalize Invocation Envelope"
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "// Validate the authoritative WF05 invocation contract.\n\nconst input = $json ?? {};\n\nconst UUID_PATTERN =\n  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;\n\nfunction requireUuid(value, fieldName) {\n  if (typeof value !== 'string') {\n    throw new Error(\n      `${fieldName} must be a UUID string`,\n    );\n  }\n\n  const normalized =\n    value.trim().toLowerCase();\n\n  if (!UUID_PATTERN.test(normalized)) {\n    throw new Error(\n      `${fieldName} must be a valid UUID`,\n    );\n  }\n\n  return normalized;\n}\n\nfunction optionalUuid(value, fieldName) {\n  if (\n    value === null ||\n    value === undefined ||\n    String(value).trim() === ''\n  ) {\n    return null;\n  }\n\n  return requireUuid(\n    value,\n    fieldName,\n  );\n}\n\nconst triggerSource = String(\n  input.trigger_source ?? '',\n)\n  .trim()\n  .toLowerCase();\n\nif (\n  triggerSource !== 'wf04' &&\n  triggerSource !== 'wf98'\n) {\n  throw new Error(\n    'trigger_source must be wf04 or wf98',\n  );\n}\n\nconst caseId = requireUuid(\n  input.case_id,\n  'case_id',\n);\n\nconst correlationId = requireUuid(\n  input.correlation_id,\n  'correlation_id',\n);\n\nconst clientId = optionalUuid(\n  input.client_id,\n  'client_id',\n);\n\nconst acceptedSubmissionId = optionalUuid(\n  input.accepted_submission_id,\n  'accepted_submission_id',\n);\n\nconst externalOperationId = optionalUuid(\n  input.external_operation_id,\n  'external_operation_id',\n);\n\nif (triggerSource === 'wf04') {\n  if (\n    clientId === null ||\n    acceptedSubmissionId === null\n  ) {\n    throw new Error(\n      'WF04 invocation requires client_id and accepted_submission_id',\n    );\n  }\n\n  if (externalOperationId !== null) {\n    throw new Error(\n      'WF04 invocation must not contain external_operation_id',\n    );\n  }\n}\n\nif (triggerSource === 'wf98') {\n  if (externalOperationId === null) {\n    throw new Error(\n      'WF98 invocation requires external_operation_id',\n    );\n  }\n\n  if (\n    clientId !== null ||\n    acceptedSubmissionId !== null\n  ) {\n    throw new Error(\n      'WF98 invocation must not contain WF04 identity fields',\n    );\n  }\n}\n\nreturn {\n  json: {\n    case_id: caseId,\n    correlation_id: correlationId,\n    trigger_source: triggerSource,\n    client_id: clientId,\n    accepted_submission_id:\n      acceptedSubmissionId,\n    external_operation_id:\n      externalOperationId,\n  },\n};"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -1024,
+        -160
+      ],
+      "id": "1412b0e9-14c2-49d1-8ecb-5285b9d89a1e",
+      "name": "Validate WF05 Invocation"
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "// Validate WF05 runtime configuration and construct the context\n// used by PostgreSQL preparation and the later provider call.\n\nconst input = $json ?? {};\n\nfunction requireText(value, fieldName) {\n  const normalized =\n    String(value ?? '').trim();\n\n  if (normalized === '') {\n    throw new Error(\n      `${fieldName} must not be blank`,\n    );\n  }\n\n  return normalized;\n}\n\nfunction readInteger(\n  name,\n  minimum,\n  maximum,\n) {\n  const rawValue = requireText(\n    $env[name],\n    name,\n  );\n\n  const value = Number(rawValue);\n\n  if (\n    !Number.isInteger(value) ||\n    value < minimum ||\n    value > maximum\n  ) {\n    throw new Error(\n      `${name} must be an integer between ${minimum} and ${maximum}`,\n    );\n  }\n\n  return value;\n}\n\nconst providerBaseUrl = requireText(\n  $env.PROVISIONING_API_BASE_URL,\n  'PROVISIONING_API_BASE_URL',\n).replace(/\\/+$/, '');\n\nlet parsedProviderUrl;\n\ntry {\n  parsedProviderUrl =\n    new URL(providerBaseUrl);\n} catch {\n  throw new Error(\n    'PROVISIONING_API_BASE_URL must be a valid URL',\n  );\n}\n\nif (\n  parsedProviderUrl.protocol !== 'http:' &&\n  parsedProviderUrl.protocol !== 'https:'\n) {\n  throw new Error(\n    'PROVISIONING_API_BASE_URL must use HTTP or HTTPS',\n  );\n}\n\nconst executionId = requireText(\n  $execution.id,\n  'execution_id',\n);\n\nconst leaseSeconds = readInteger(\n  'WF05_OPERATION_LEASE_SECONDS',\n  1,\n  86400,\n);\n\nconst maxAttempts = readInteger(\n  'WF05_OPERATION_MAX_ATTEMPTS',\n  1,\n  20,\n);\n\nlet scenario = null;\n\nif (input.trigger_source === 'wf04') {\n  scenario = requireText(\n    $env.WF05_PROVISIONING_SCENARIO,\n    'WF05_PROVISIONING_SCENARIO',\n  ).toLowerCase();\n\n  const allowedScenarios =\n    new Set([\n      'success',\n      'retryable_once',\n      'retryable_always',\n      'terminal',\n    ]);\n\n  if (!allowedScenarios.has(scenario)) {\n    throw new Error(\n      'WF05_PROVISIONING_SCENARIO is invalid',\n    );\n  }\n}\n\nreturn {\n  json: {\n    ...input,\n\n    execution_id:\n      executionId,\n\n    scenario,\n\n    provider_base_url:\n      providerBaseUrl,\n\n    lease_seconds:\n      leaseSeconds,\n\n    max_attempts:\n      maxAttempts,\n  },\n};"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -800,
+        -160
+      ],
+      "id": "4f200758-c518-4778-8cb0-8d252dc8c21c",
+      "name": "Prepare WF05 Request Context"
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT\n    $11::jsonb AS input_context,\n    prepare_wf05_provision_client(\n        $1::uuid,\n        $2::uuid,\n        $3::text,\n        $4::uuid,\n        $5::uuid,\n        $6::uuid,\n        $7::text,\n        $8::text,\n        $9::integer,\n        $10::integer\n    ) AS preparation_result;",
+        "options": {
+          "queryReplacement": "={{\n[\n  $json.case_id,\n  $json.correlation_id,\n  $json.trigger_source,\n  $json.client_id,\n  $json.accepted_submission_id,\n  $json.external_operation_id,\n  $json.execution_id,\n  $json.scenario,\n  $json.lease_seconds,\n  $json.max_attempts,\n  JSON.stringify($json)\n]\n}}"
+        }
+      },
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        -576,
+        -160
+      ],
+      "id": "58af806d-4a36-4cff-a16f-d1d7b88aaf6e",
+      "name": "Prepare Provisioning Operation",
+      "credentials": {
+        "postgres": {
+          "id": "zU4wPvkQFRBSwH0b",
+          "name": "B2B Onboarding App DB"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "// Normalize the authoritative PostgreSQL WF05 preparation result\n// before routing to provider call, no-op, or WF99 intervention.\n\nconst row = $json ?? {};\n\nfunction isPlainObject(value) {\n  return (\n    value !== null &&\n    typeof value === 'object' &&\n    !Array.isArray(value)\n  );\n}\n\nfunction requireText(value, fieldName) {\n  const normalized =\n    String(value ?? '').trim();\n\n  if (normalized === '') {\n    throw new Error(\n      `${fieldName} must not be blank`,\n    );\n  }\n\n  return normalized;\n}\n\nfunction optionalText(value) {\n  if (\n    value === null ||\n    value === undefined\n  ) {\n    return null;\n  }\n\n  const normalized =\n    String(value).trim();\n\n  return normalized === ''\n    ? null\n    : normalized;\n}\n\nif (!isPlainObject(row.input_context)) {\n  throw new Error(\n    'input_context must be a JSON object',\n  );\n}\n\nif (!isPlainObject(row.preparation_result)) {\n  throw new Error(\n    'preparation_result must be a JSON object',\n  );\n}\n\nconst inputContext =\n  row.input_context;\n\nconst result =\n  row.preparation_result;\n\nconst preparationOutcome = requireText(\n  result.preparation_outcome,\n  'preparation_outcome',\n);\n\nlet nextAction;\n\nif (\n  preparationOutcome ===\n  'ready_to_call'\n) {\n  nextAction =\n    'call_provider';\n\n} else if (\n  new Set([\n    'already_provisioned',\n    'busy',\n    'not_due',\n    'not_required',\n  ]).has(preparationOutcome)\n) {\n  nextAction =\n    'no_action';\n\n} else {\n  nextAction =\n    'operator_intervention_required';\n}\n\nlet providerUrl = null;\n\nif (nextAction === 'call_provider') {\n  const providerBaseUrl = requireText(\n    inputContext.provider_base_url,\n    'provider_base_url',\n  ).replace(/\\/+$/, '');\n\n  const endpointPath = requireText(\n    result.endpoint_path,\n    'endpoint_path',\n  );\n\n  providerUrl =\n    providerBaseUrl +\n    (\n      endpointPath.startsWith('/')\n        ? endpointPath\n        : `/${endpointPath}`\n    );\n\n  requireText(\n    result.operation_id,\n    'operation_id',\n  );\n\n  requireText(\n    result.lease_owner,\n    'lease_owner',\n  );\n\n  requireText(\n    result.idempotency_key,\n    'idempotency_key',\n  );\n\n  requireText(\n    result.company_name,\n    'company_name',\n  );\n\n  requireText(\n    result.company_identifier,\n    'company_identifier',\n  );\n\n  requireText(\n    result.scenario,\n    'scenario',\n  );\n}\n\nreturn {\n  json: {\n    ...inputContext,\n    ...result,\n\n    workflow:\n      'WF05',\n\n    next_action:\n      nextAction,\n\n    provider_url:\n      providerUrl,\n\n    error_code:\n      optionalText(result.error_code),\n  },\n};"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -336,
+        -160
+      ],
+      "id": "8ef707ef-0c8b-4c86-86d6-189c0ed8c3d5",
+      "name": "Normalize Provisioning Preparation"
+    },
+    {
+      "parameters": {
+        "rules": {
+          "values": [
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 3
+                },
+                "conditions": [
+                  {
+                    "id": "98c7cb45-b511-405e-aee4-57221bb73af1",
+                    "leftValue": "={{ $json.next_action }}",
+                    "rightValue": "call_provider",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals",
+                      "name": "filter.operator.equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "call_provider"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 3
+                },
+                "conditions": [
+                  {
+                    "id": "f537bf6c-09a7-4d46-ba71-a7bd8b26a9ac",
+                    "leftValue": "={{ $json.next_action }}",
+                    "rightValue": "no_action",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals",
+                      "name": "filter.operator.equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "no_action"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 3
+                },
+                "conditions": [
+                  {
+                    "id": "d1cf8542-aa48-4cd2-8620-3b14827fd76c",
+                    "leftValue": "={{ $json.next_action }}",
+                    "rightValue": "operator_intervention_required",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals",
+                      "name": "filter.operator.equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "operator_intervention_required"
+            }
+          ]
+        },
+        "options": {
+          "fallbackOutput": "extra"
+        }
+      },
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 3.4,
+      "position": [
+        -96,
+        -160
+      ],
+      "id": "6f62f847-8bd7-4f01-8af4-0bb911de4ad5",
+      "name": "Route Provisioning Preparation"
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "// Return a controlled idempotent WF05 no-action result.\n\nconst input = $json ?? {};\n\nif (input.next_action !== 'no_action') {\n  throw new Error(\n    'Return Provisioning No Action Result received an invalid next action',\n  );\n}\n\nreturn {\n  json: {\n    workflow:\n      'WF05',\n\n    result:\n      'no_action',\n\n    preparation_outcome:\n      input.preparation_outcome ?? null,\n\n    operation_claim_outcome:\n      input.operation_claim_outcome ?? null,\n\n    case_id:\n      input.case_id ?? null,\n\n    correlation_id:\n      input.correlation_id ?? null,\n\n    operation_id:\n      input.operation_id ?? null,\n\n    external_client_id:\n      input.external_client_id ?? null,\n\n    case_state:\n      input.case_state ?? null,\n  },\n};"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        192,
+        -32
+      ],
+      "id": "674521f8-d1b6-4212-be40-9d2fa62cacb3",
+      "name": "Return Provisioning No Action Result"
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "// Build the canonical WF99 explicit-internal error envelope\n// when WF05 cannot safely prepare a provisioning operation.\n\nconst input = $json ?? {};\n\nif (\n  input.next_action !==\n  'operator_intervention_required'\n) {\n  throw new Error(\n    'Build WF05 Preparation Intervention Context received an invalid next action',\n  );\n}\n\nconst executionId =\n  String($execution.id ?? '').trim() ||\n  null;\n\nreturn {\n  json: {\n    source_variant:\n      'explicit_internal',\n\n    source_workflow_name:\n      'WF05 - Provision Client',\n\n    source_workflow_id:\n      '1nU3HodQoHZJPuHX',\n\n    source_execution_id:\n      executionId,\n\n    case_id:\n      input.case_id ?? null,\n\n    correlation_id:\n      input.correlation_id ?? null,\n\n    step_id:\n      input.provision_step_id ?? null,\n\n    submission_id:\n      input.accepted_submission_id ?? null,\n\n    external_operation_id:\n      input.operation_id ??\n      input.external_operation_id ??\n      null,\n\n    error_class:\n      input.preparation_outcome ===\n      'failed_terminal'\n        ? 'provider_terminal_failure'\n        : 'workflow_contract_failure',\n\n    error_code:\n      input.error_code ??\n      'wf05_provisioning_preparation_failed',\n\n    error_message:\n      'WF05 could not safely prepare the client provisioning operation.',\n\n    retryable:\n      false,\n\n    severity:\n      'error',\n\n    requires_intervention:\n      true,\n\n    error_details: {\n      preparation_outcome:\n        input.preparation_outcome ?? null,\n\n      operation_claim_outcome:\n        input.operation_claim_outcome ?? null,\n\n      operation_status:\n        input.operation_status ?? null,\n\n      operation_attempt_count:\n        input.operation_attempt_count ?? null,\n\n      operation_max_attempts:\n        input.operation_max_attempts ?? null,\n\n      case_state:\n        input.case_state ?? null,\n\n      provision_step_status:\n        input.provision_step_status ?? null,\n\n      trigger_source:\n        input.trigger_source ?? null,\n    },\n  },\n};"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        192,
+        160
+      ],
+      "id": "f8eff67f-7d69-4cb7-953d-112a666e287c",
+      "name": "Build WF05 Preparation Intervention Context"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://n8n-main:5678/webhook/internal/wf99-retry-dispatch",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ $json }}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [
+        496,
+        160
+      ],
+      "id": "972f51b5-6be2-4181-b3ac-bd747d9ebf7b",
+      "name": "Dispatch WF05 Intervention to WF99",
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "vRGUhlaMi4SARvdN",
+          "name": "Header Auth account"
+        }
+      }
+    }
+  ],
+  "connections": {
+    "Webhook": {
+      "main": [
+        [
+          {
+            "node": "Normalize Invocation Envelope",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Internal Invocation Trigger": {
+      "main": [
+        [
+          {
+            "node": "Normalize Invocation Envelope",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Normalize Invocation Envelope": {
+      "main": [
+        [
+          {
+            "node": "Validate WF05 Invocation",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Validate WF05 Invocation": {
+      "main": [
+        [
+          {
+            "node": "Prepare WF05 Request Context",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare WF05 Request Context": {
+      "main": [
+        [
+          {
+            "node": "Prepare Provisioning Operation",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare Provisioning Operation": {
+      "main": [
+        [
+          {
+            "node": "Normalize Provisioning Preparation",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Normalize Provisioning Preparation": {
+      "main": [
+        [
+          {
+            "node": "Route Provisioning Preparation",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Route Provisioning Preparation": {
+      "main": [
+        [],
+        [
+          {
+            "node": "Return Provisioning No Action Result",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Build WF05 Preparation Intervention Context",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Build WF05 Preparation Intervention Context",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build WF05 Preparation Intervention Context": {
+      "main": [
+        [
+          {
+            "node": "Dispatch WF05 Intervention to WF99",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate",
+    "availableInMCP": false,
+    "timeSavedMode": "fixed",
+    "errorWorkflow": "WykBM7mvCOqph91a",
+    "callerPolicy": "workflowsFromSameOwner"
+  },
+  "staticData": null,
+  "meta": {
+    "templateCredsSetupCompleted": true
+  },
+  "nodeGroups": [],
+  "pinData": {},
+  "versionId": "3e86bc83-a605-47ed-8f5a-c0f387575026",
+  "activeVersionId": null,
+  "versionCounter": 15,
+  "triggerCount": 0,
+  "sourceWorkflowId": null,
+  "tags": [],
+  "shared": [
+    {
+      "updatedAt": "2026-07-19T17:57:39.335Z",
+      "createdAt": "2026-07-19T17:57:39.335Z",
+      "role": "workflow:owner",
+      "workflowId": "1nU3HodQoHZJPuHX",
+      "projectId": "zmxxmv9P8lYEvh92",
+      "project": {
+        "updatedAt": "2026-07-18T09:30:21.224Z",
+        "createdAt": "2026-07-18T09:24:05.682Z",
+        "id": "zmxxmv9P8lYEvh92",
+        "name": "Vitalii Pokhyl <pokhylvitalii@gmail.com>",
+        "type": "personal",
+        "icon": null,
+        "description": null,
+        "customTelemetryTags": [],
+        "creatorId": "9bff2e70-7eea-4940-a9da-d5dfd1c2d055"
+      }
+    }
+  ],
+  "versionMetadata": {
+    "name": null,
+    "description": null
+  }
+}
