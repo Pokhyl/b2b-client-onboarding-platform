@@ -1,5 +1,5 @@
 {
-  "updatedAt": "2026-07-26T19:34:40.473Z",
+  "updatedAt": "2026-07-27T15:17:29.387Z",
   "createdAt": "2026-07-19T17:57:15.410Z",
   "id": "I6nqXCOFa3qycHtY",
   "name": "WF04 - Manual Approval",
@@ -227,8 +227,8 @@
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
       "position": [
-        -768,
-        -288
+        -928,
+        -240
       ],
       "id": "2019eb26-08d6-4393-a364-4b7f69701959",
       "name": "Return No Action Result"
@@ -242,7 +242,7 @@
       "typeVersion": 2,
       "position": [
         -768,
-        -128
+        16
       ],
       "id": "187a1925-c4ef-4049-8ffa-d0af192ccf1f",
       "name": "Build WF04 Intervention Context"
@@ -256,7 +256,7 @@
       "typeVersion": 2,
       "position": [
         -976,
-        -464
+        -592
       ],
       "id": "9895e4ab-af39-40fc-b2f4-0359bcee2af5",
       "name": "Build Approval Email"
@@ -285,8 +285,8 @@
       "type": "n8n-nodes-base.gmail",
       "typeVersion": 2.2,
       "position": [
-        -768,
-        -464
+        -672,
+        -288
       ],
       "id": "86b297b0-acb6-4f9e-83e8-51467276c0bc",
       "name": "Send Approval and Wait",
@@ -296,18 +296,19 @@
           "id": "LcK92xSDT34cJaIK",
           "name": "Gmail account"
         }
-      }
+      },
+      "onError": "continueErrorOutput"
     },
     {
       "parameters": {
         "mode": "runOnceForEachItem",
-        "jsCode": "// Normalize the Gmail approval response without relying\n// on data from nodes that executed before the wait.\n\nconst input = $json ?? {};\n\nfunction optionalText(value) {\n  if (\n    value === null ||\n    value === undefined\n  ) {\n    return null;\n  }\n\n  const normalized =\n    String(value).trim();\n\n  return normalized === ''\n    ? null\n    : normalized;\n}\n\nconst approved =\n  typeof input?.data?.approved === 'boolean'\n    ? input.data.approved\n    : typeof input.approved === 'boolean'\n      ? input.approved\n      : typeof input?.response?.approved === 'boolean'\n        ? input.response.approved\n        : null;\n\nif (approved === null) {\n  throw new Error(\n    'Gmail approval response does not contain a boolean approved value',\n  );\n}\n\nconst waitingExecutionId =\n  String($execution.id ?? '').trim();\n\nif (waitingExecutionId === '') {\n  throw new Error(\n    'Current n8n execution ID is unavailable',\n  );\n}\n\nreturn {\n  json: {\n    workflow:\n      'WF04',\n\n    waiting_execution_id:\n      waitingExecutionId,\n\n    lease_owner:\n      `WF04:${waitingExecutionId}`,\n\n    decision:\n      approved\n        ? 'approved'\n        : 'rejected',\n\n    responded_at:\n      new Date().toISOString(),\n\n    gmail_message_id:\n      optionalText(\n        input?.data?.messageId ??\n        input?.data?.message_id ??\n        input?.messageId ??\n        input?.message_id,\n      ),\n\n    gmail_thread_id:\n      optionalText(\n        input?.data?.threadId ??\n        input?.data?.thread_id ??\n        input?.threadId ??\n        input?.thread_id,\n      ),\n\n    operator_comment:\n      optionalText(\n        input?.data?.comment ??\n        input?.data?.text ??\n        input?.comment,\n      ),\n\n    response_source:\n      'n8n_send_and_wait',\n  },\n};"
+        "jsCode": "// Classify the Gmail send-and-wait result while preserving\n// the authoritative approval-operation context.\n\nconst input = $json ?? {};\n\nconst UUID_PATTERN =\n  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;\n\nfunction optionalText(value, maximumLength = 1000) {\n  if (\n    value === null ||\n    value === undefined\n  ) {\n    return null;\n  }\n\n  const normalized = String(value)\n    .replace(\n      /[\\u0000-\\u0008\\u000B\\u000C\\u000E-\\u001F\\u007F]/g,\n      ' ',\n    )\n    .replace(/\\s+/g, ' ')\n    .trim();\n\n  return normalized === ''\n    ? null\n    : normalized.slice(0, maximumLength);\n}\n\nfunction optionalUuid(value) {\n  const normalized =\n    optionalText(value, 36);\n\n  return (\n    normalized !== null &&\n    UUID_PATTERN.test(normalized)\n  )\n    ? normalized.toLowerCase()\n    : null;\n}\n\nfunction optionalInteger(value) {\n  const normalized = Number(value);\n\n  return Number.isInteger(normalized)\n    ? normalized\n    : null;\n}\n\nfunction extractErrorMessage(value) {\n  if (typeof value === 'string') {\n    return optionalText(value);\n  }\n\n  if (\n    value !== null &&\n    typeof value === 'object' &&\n    !Array.isArray(value)\n  ) {\n    return optionalText(\n      value.message ??\n      value.description ??\n      value.error ??\n      JSON.stringify(value),\n    );\n  }\n\n  return null;\n}\n\nconst waitingExecutionId =\n  optionalText(\n    $execution.id,\n    200,\n  );\n\nif (waitingExecutionId === null) {\n  throw new Error(\n    'Current n8n execution ID is unavailable',\n  );\n}\n\nconst approved =\n  typeof input?.data?.approved === 'boolean'\n    ? input.data.approved\n    : typeof input.approved === 'boolean'\n      ? input.approved\n      : typeof input?.response?.approved === 'boolean'\n        ? input.response.approved\n        : null;\n\nconst providerError =\n  extractErrorMessage(\n    input.error,\n  ) ??\n  (\n    input.name === 'NodeApiError' ||\n    input.name === 'NodeOperationError'\n      ? extractErrorMessage(input)\n      : null\n  );\n\nconst commonResult = {\n  workflow:\n    'WF04',\n\n  waiting_execution_id:\n    waitingExecutionId,\n\n  lease_owner:\n    `WF04:${waitingExecutionId}`,\n\n  case_id:\n    optionalUuid(input.case_id),\n\n  correlation_id:\n    optionalUuid(input.correlation_id),\n\n  approval_step_id:\n    optionalUuid(input.approval_step_id),\n\n  accepted_submission_id:\n    optionalUuid(input.accepted_submission_id),\n\n  client_id:\n    optionalUuid(input.client_id),\n\n  operation_id:\n    optionalUuid(input.operation_id),\n\n  recipient_email:\n    optionalText(\n      input.recipient_email ??\n      input.approval_recipient,\n      320,\n    ),\n\n  operation_attempt_count:\n    optionalInteger(\n      input.operation_attempt_count,\n    ),\n\n  operation_max_attempts:\n    optionalInteger(\n      input.operation_max_attempts ??\n      input.max_attempts,\n    ),\n};\n\nif (approved !== null) {\n  return {\n    json: {\n      ...commonResult,\n\n      approval_wait_outcome:\n        'response_received',\n\n      decision:\n        approved\n          ? 'approved'\n          : 'rejected',\n\n      responded_at:\n        new Date().toISOString(),\n\n      gmail_message_id:\n        optionalText(\n          input?.data?.messageId ??\n          input?.data?.message_id ??\n          input?.messageId ??\n          input?.message_id,\n          500,\n        ),\n\n      gmail_thread_id:\n        optionalText(\n          input?.data?.threadId ??\n          input?.data?.thread_id ??\n          input?.threadId ??\n          input?.thread_id,\n          500,\n        ),\n\n      operator_comment:\n        optionalText(\n          input?.data?.comment ??\n          input?.data?.text ??\n          input?.comment,\n          2000,\n        ),\n\n      response_source:\n        'n8n_send_and_wait',\n    },\n  };\n}\n\nif (providerError !== null) {\n  return {\n    json: {\n      ...commonResult,\n\n      approval_wait_outcome:\n        'gmail_send_failed',\n\n      error_class:\n        'gmail_send_failure',\n\n      error_message:\n        providerError,\n\n      error_details: {\n        provider:\n          'gmail',\n\n        stage:\n          'send_approval_request',\n      },\n    },\n  };\n}\n\nconst timeoutContextValid =\n  input.preparation_decision ===\n    'send_approval_request' &&\n  optionalText(\n    input.waiting_execution_id,\n    200,\n  ) === waitingExecutionId &&\n  commonResult.case_id !== null &&\n  commonResult.operation_id !== null &&\n  commonResult.recipient_email !== null;\n\nif (timeoutContextValid) {\n  return {\n    json: {\n      ...commonResult,\n\n      approval_wait_outcome:\n        'approval_response_timeout',\n\n      error_class:\n        'approval_response_timeout',\n\n      error_message:\n        'No approval response was received before the configured deadline.',\n\n      error_details: {\n        provider:\n          'gmail',\n\n        stage:\n          'wait_for_approval',\n\n        timeout_hours:\n          Number(\n            input.response_timeout_hours,\n          ) || null,\n      },\n    },\n  };\n}\n\nreturn {\n  json: {\n    ...commonResult,\n\n    approval_wait_outcome:\n      'invalid_wait_result',\n\n    error_class:\n      'workflow_contract_failure',\n\n    error_message:\n      'WF04 received an unsupported Gmail send-and-wait result.',\n\n    error_details: {\n      provider:\n        'gmail',\n\n      stage:\n        'send_and_wait_result_classification',\n\n      received_fields:\n        Object.keys(input)\n          .slice(0, 50),\n    },\n  },\n};"
       },
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
       "position": [
-        -560,
-        -464
+        -80,
+        -432
       ],
       "id": "61964bae-0456-402d-b90d-3b82c0a496f2",
       "name": "Normalize Approval Response"
@@ -323,7 +324,7 @@
       "type": "n8n-nodes-base.postgres",
       "typeVersion": 2.6,
       "position": [
-        -352,
+        384,
         -464
       ],
       "id": "8ada87be-aa4c-4646-951b-52341ce088db",
@@ -343,7 +344,7 @@
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
       "position": [
-        -144,
+        576,
         -464
       ],
       "id": "b0a86dda-7cdc-478a-8fff-dd11fd4d430b",
@@ -461,8 +462,8 @@
       "type": "n8n-nodes-base.switch",
       "typeVersion": 3.4,
       "position": [
-        64,
-        -464
+        848,
+        -496
       ],
       "id": "50e508ab-1357-47b6-8fb9-a6847e2b1aed",
       "name": "Route Approval Finalization"
@@ -475,8 +476,8 @@
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
       "position": [
-        624,
-        -528
+        1184,
+        -560
       ],
       "id": "11e0a91f-0d24-4437-9f9a-a691d246c20d",
       "name": "Return Rejected Result"
@@ -489,8 +490,8 @@
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
       "position": [
-        624,
-        -368
+        1184,
+        -384
       ],
       "id": "43feff11-f1e0-493c-87f1-7978008af9a7",
       "name": "Return Finalization No Action Result"
@@ -503,8 +504,8 @@
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
       "position": [
-        624,
-        -208
+        1200,
+        -192
       ],
       "id": "bad3f80f-18d1-46b5-9e47-6acc50c8675d",
       "name": "Build WF04 Finalization Intervention Context"
@@ -523,8 +524,8 @@
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.4,
       "position": [
-        976,
-        -80
+        1552,
+        -64
       ],
       "id": "a1ac1bdd-659f-4f9a-a196-b84ac5107a00",
       "name": "Dispatch WF04 Intervention to WF99",
@@ -534,6 +535,351 @@
           "name": "Header Auth account"
         }
       }
+    },
+    {
+      "parameters": {
+        "rules": {
+          "values": [
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 3
+                },
+                "conditions": [
+                  {
+                    "leftValue": "={{ $json.approval_wait_outcome }}",
+                    "rightValue": "response_received",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    },
+                    "id": "98d16730-fa35-4fbd-8a6d-ba90e716100a"
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "response_received"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 3
+                },
+                "conditions": [
+                  {
+                    "id": "227f26df-ad12-491f-956d-4e9de51f2c20",
+                    "leftValue": "={{ $json.approval_wait_outcome }}",
+                    "rightValue": "approval_response_timeout",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals",
+                      "name": "filter.operator.equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "approval_response_timeout"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 3
+                },
+                "conditions": [
+                  {
+                    "id": "126034e7-6f81-4c04-acd0-84f295172214",
+                    "leftValue": "={{ $json.approval_wait_outcome }}",
+                    "rightValue": "gmail_send_failed",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals",
+                      "name": "filter.operator.equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "gmail_send_failed"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 3
+                },
+                "conditions": [
+                  {
+                    "id": "6dcb79b6-a8fe-4e95-8d0e-1edc6a96b248",
+                    "leftValue": "={{ $json.approval_wait_outcome }}",
+                    "rightValue": "invalid_wait_result",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals",
+                      "name": "filter.operator.equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "invalid_wait_result"
+            }
+          ]
+        },
+        "options": {
+          "fallbackOutput": "extra"
+        }
+      },
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 3.4,
+      "position": [
+        80,
+        -304
+      ],
+      "id": "c9a94c93-d780-4078-8a49-f62ebdc5625b",
+      "name": "Route Approval Wait Outcome"
+    },
+    {
+      "parameters": {
+        "mode": "combine",
+        "combineBy": "combineByPosition",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.merge",
+      "typeVersion": 3.2,
+      "position": [
+        -480,
+        -512
+      ],
+      "id": "cb02ec5a-7b71-4999-b55f-41d871a0e86c",
+      "name": "Merge Approval Response Context"
+    },
+    {
+      "parameters": {
+        "mode": "combine",
+        "combineBy": "combineByPosition",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.merge",
+      "typeVersion": 3.2,
+      "position": [
+        -384,
+        -320
+      ],
+      "id": "ca7e8d9b-b40d-40e3-8430-9f3b2fcb27aa",
+      "name": "Merge Approval Failure Context"
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "// Prepare the authoritative failure-finalization input\n// for approval timeout, Gmail send failure, or invalid wait output.\n\nconst input = $json ?? {};\n\nconst UUID_PATTERN =\n  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;\n\nfunction requireText(value, fieldName, maximumLength = 1000) {\n  const normalized =\n    String(value ?? '').trim();\n\n  if (normalized === '') {\n    throw new Error(\n      `${fieldName} must not be blank`,\n    );\n  }\n\n  if (normalized.length > maximumLength) {\n    throw new Error(\n      `${fieldName} exceeds ${maximumLength} characters`,\n    );\n  }\n\n  return normalized;\n}\n\nfunction optionalText(value, maximumLength = 1000) {\n  if (\n    value === null ||\n    value === undefined\n  ) {\n    return null;\n  }\n\n  const normalized =\n    String(value).trim();\n\n  return normalized === ''\n    ? null\n    : normalized.slice(0, maximumLength);\n}\n\nfunction requireUuid(value, fieldName) {\n  const normalized =\n    requireText(value, fieldName, 36)\n      .toLowerCase();\n\n  if (!UUID_PATTERN.test(normalized)) {\n    throw new Error(\n      `${fieldName} must be a valid UUID`,\n    );\n  }\n\n  return normalized;\n}\n\nfunction optionalUuid(value) {\n  const normalized =\n    optionalText(value, 36);\n\n  return (\n    normalized !== null &&\n    UUID_PATTERN.test(normalized)\n  )\n    ? normalized.toLowerCase()\n    : null;\n}\n\nfunction optionalInteger(value) {\n  const normalized = Number(value);\n\n  return Number.isInteger(normalized)\n    ? normalized\n    : null;\n}\n\nconst outcome =\n  requireText(\n    input.approval_wait_outcome ??\n      'invalid_wait_result',\n    'approval_wait_outcome',\n    100,\n  );\n\nif (outcome === 'response_received') {\n  throw new Error(\n    'Approval responses must not enter failure finalization',\n  );\n}\n\nconst caseId =\n  requireUuid(\n    input.case_id,\n    'case_id',\n  );\n\nconst operationId =\n  requireUuid(\n    input.operation_id,\n    'operation_id',\n  );\n\nconst waitingExecutionId =\n  requireText(\n    input.waiting_execution_id,\n    'waiting_execution_id',\n    200,\n  );\n\nconst recipientEmail =\n  requireText(\n    input.recipient_email,\n    'recipient_email',\n    320,\n  ).toLowerCase();\n\nconst attemptCount =\n  optionalInteger(\n    input.operation_attempt_count,\n  );\n\nconst maxAttempts =\n  optionalInteger(\n    input.operation_max_attempts,\n  );\n\nconst retryable =\n  outcome === 'gmail_send_failed' &&\n  attemptCount !== null &&\n  maxAttempts !== null &&\n  attemptCount < maxAttempts;\n\nconst nextRetryAt =\n  retryable\n    ? new Date(\n        Date.now() + 10 * 60 * 1000,\n      ).toISOString()\n    : null;\n\nlet errorClass;\n\nif (outcome === 'approval_response_timeout') {\n  errorClass =\n    'approval_response_timeout';\n} else if (outcome === 'gmail_send_failed') {\n  errorClass =\n    'gmail_send_failure';\n} else {\n  errorClass =\n    'workflow_contract_failure';\n}\n\nreturn {\n  json: {\n    case_id:\n      caseId,\n\n    correlation_id:\n      optionalUuid(\n        input.correlation_id,\n      ),\n\n    approval_step_id:\n      optionalUuid(\n        input.approval_step_id,\n      ),\n\n    accepted_submission_id:\n      optionalUuid(\n        input.accepted_submission_id,\n      ),\n\n    client_id:\n      optionalUuid(\n        input.client_id,\n      ),\n\n    operation_id:\n      operationId,\n\n    waiting_execution_id:\n      waitingExecutionId,\n\n    lease_owner:\n      `WF04:${waitingExecutionId}`,\n\n    recipient_email:\n      recipientEmail,\n\n    approval_wait_outcome:\n      outcome,\n\n    operation_attempt_count:\n      attemptCount,\n\n    operation_max_attempts:\n      maxAttempts,\n\n    retryable,\n\n    error_class:\n      errorClass,\n\n    error_message:\n      requireText(\n        input.error_message ??\n          'WF04 approval wait failed',\n        'error_message',\n        1000,\n      ),\n\n    error_summary: {\n      approval_wait_outcome:\n        outcome,\n\n      error_message:\n        requireText(\n          input.error_message ??\n            'WF04 approval wait failed',\n          'error_message',\n          1000,\n        ),\n\n      provider:\n        input.error_details?.provider ??\n        null,\n\n      stage:\n        input.error_details?.stage ??\n        null,\n\n      operation_attempt_count:\n        attemptCount,\n\n      operation_max_attempts:\n        maxAttempts,\n\n      timeout_hours:\n        input.error_details?.timeout_hours ??\n        null,\n    },\n\n    next_retry_at:\n      nextRetryAt,\n  },\n};"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        304,
+        64
+      ],
+      "id": "fb1cab10-45b3-41ed-ae3c-a7cd730ea706",
+      "name": "Prepare Approval Failure Finalization"
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "WITH finalized AS (\n    SELECT *\n    FROM finalize_wf04_approval_failure(\n        $1::uuid,\n        $2::uuid,\n        $3::text,\n        $4::text,\n        $5::text,\n        $6::boolean,\n        $7::text,\n        $8::jsonb,\n        $9::timestamptz\n    )\n)\nSELECT\n    $10::jsonb AS input_context,\n    finalized.*\nFROM finalized;",
+        "options": {
+          "queryReplacement": "={{ [   $json.case_id,   $json.operation_id,   $json.lease_owner,   $json.waiting_execution_id,   $json.recipient_email,   $json.retryable,   $json.error_class,   JSON.stringify($json.error_summary),   $json.next_retry_at,   JSON.stringify($json) ] }}"
+        }
+      },
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        528,
+        64
+      ],
+      "id": "e7e2f770-6b0c-48fb-8cf2-bca513f932a0",
+      "name": "Finalize Approval Failure",
+      "credentials": {
+        "postgres": {
+          "id": "zU4wPvkQFRBSwH0b",
+          "name": "B2B Onboarding App DB"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "// Normalize the authoritative PostgreSQL result produced\n// after an approval wait or Gmail delivery failure.\n\nconst row = $json ?? {};\n\nfunction parseObject(value) {\n  if (\n    value !== null &&\n    typeof value === 'object' &&\n    !Array.isArray(value)\n  ) {\n    return value;\n  }\n\n  if (typeof value === 'string') {\n    try {\n      const parsed = JSON.parse(value);\n\n      if (\n        parsed !== null &&\n        typeof parsed === 'object' &&\n        !Array.isArray(parsed)\n      ) {\n        return parsed;\n      }\n    } catch {\n      return {};\n    }\n  }\n\n  return {};\n}\n\nfunction optionalText(value, maximumLength = 1000) {\n  if (\n    value === null ||\n    value === undefined\n  ) {\n    return null;\n  }\n\n  const normalized =\n    String(value).trim();\n\n  return normalized === ''\n    ? null\n    : normalized.slice(0, maximumLength);\n}\n\nconst context =\n  parseObject(\n    row.input_context,\n  );\n\nconst finalizationOutcome =\n  optionalText(\n    row.finalization_outcome,\n    100,\n  );\n\nconst finalOperationStatus =\n  optionalText(\n    row.final_operation_status,\n    100,\n  );\n\nconst finalStepStatus =\n  optionalText(\n    row.final_step_status,\n    100,\n  );\n\nconst finalCaseState =\n  optionalText(\n    row.final_case_state,\n    100,\n  );\n\nlet nextAction =\n  'operator_intervention_required';\n\nif (\n  finalizationOutcome === 'finalized' &&\n  finalOperationStatus === 'failed_retryable' &&\n  finalStepStatus === 'failed_retryable' &&\n  finalCaseState === 'awaiting_approval'\n) {\n  nextAction =\n    'return_failed_retryable';\n\n} else if (\n  finalizationOutcome === 'finalized' &&\n  finalOperationStatus === 'failed_terminal' &&\n  finalStepStatus === 'failed_terminal' &&\n  finalCaseState === 'awaiting_approval'\n) {\n  nextAction =\n    'notify_terminal_failure';\n\n} else if (\n  finalizationOutcome === 'lease_not_owned'\n) {\n  nextAction =\n    'no_action';\n\n} else if (\n  finalizationOutcome ===\n    'failure_context_invalid' &&\n  (\n    [\n      'failed_retryable',\n      'failed_terminal',\n      'succeeded',\n    ].includes(finalOperationStatus) ||\n    [\n      'failed_retryable',\n      'failed_terminal',\n      'completed',\n    ].includes(finalStepStatus) ||\n    [\n      'approved',\n      'rejected',\n    ].includes(finalCaseState)\n  )\n) {\n  nextAction =\n    'no_action';\n}\n\nreturn {\n  json: {\n    ...context,\n\n    next_action:\n      nextAction,\n\n    failure_finalization_outcome:\n      finalizationOutcome,\n\n    final_operation_status:\n      finalOperationStatus,\n\n    final_step_status:\n      finalStepStatus,\n\n    final_case_state:\n      finalCaseState,\n  },\n};"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        768,
+        64
+      ],
+      "id": "ed04eaab-5ce4-4d9a-aea2-c54aa1e6a080",
+      "name": "Normalize Approval Failure Finalization"
+    },
+    {
+      "parameters": {
+        "rules": {
+          "values": [
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 3
+                },
+                "conditions": [
+                  {
+                    "leftValue": "={{ $json.next_action }}",
+                    "rightValue": "return_failed_retryable",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    },
+                    "id": "b2322b25-e259-4056-a2b4-f539fc103fcb"
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "return_failed_retryable"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 3
+                },
+                "conditions": [
+                  {
+                    "id": "48c36480-bd97-404e-8a3f-61ea1f235519",
+                    "leftValue": "={{ $json.next_action }}",
+                    "rightValue": "no_action",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals",
+                      "name": "filter.operator.equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "no_action"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 3
+                },
+                "conditions": [
+                  {
+                    "id": "1ddcc48e-97a8-4338-8474-4910701a47b0",
+                    "leftValue": "={{ $json.next_action }}",
+                    "rightValue": "notify_terminal_failure",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals",
+                      "name": "filter.operator.equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "notify_terminal_failure"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 3
+                },
+                "conditions": [
+                  {
+                    "id": "de86a842-8629-44f1-ac3a-65990b5d80dc",
+                    "leftValue": "={{ $json.next_action }}",
+                    "rightValue": "operator_intervention_required",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals",
+                      "name": "filter.operator.equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "operator_intervention_required"
+            }
+          ]
+        },
+        "options": {
+          "fallbackOutput": "extra"
+        }
+      },
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 3.4,
+      "position": [
+        976,
+        64
+      ],
+      "id": "f05256b2-27db-4abf-93af-4167aaffbd32",
+      "name": "Route Approval Failure Finalization"
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "// Return either a scheduled retry result or a clean\n// no-action result for an obsolete failure execution.\n\nconst input = $json ?? {};\n\nif (\n  input.next_action ===\n  'return_failed_retryable'\n) {\n  if (\n    input.final_operation_status !==\n      'failed_retryable' ||\n    input.final_step_status !==\n      'failed_retryable' ||\n    input.final_case_state !==\n      'awaiting_approval'\n  ) {\n    throw new Error(\n      'Retryable WF04 failure contains inconsistent persisted states',\n    );\n  }\n\n  return {\n    json: {\n      workflow:\n        'WF04',\n\n      result:\n        'failed_retryable',\n\n      case_id:\n        input.case_id ?? null,\n\n      correlation_id:\n        input.correlation_id ?? null,\n\n      external_operation_id:\n        input.operation_id ?? null,\n\n      operation_status:\n        input.final_operation_status,\n\n      approval_step_status:\n        input.final_step_status,\n\n      next_retry_at:\n        input.next_retry_at ?? null,\n    },\n  };\n}\n\nif (input.next_action === 'no_action') {\n  return {\n    json: {\n      workflow:\n        'WF04',\n\n      result:\n        'no_action',\n\n      case_id:\n        input.case_id ?? null,\n\n      external_operation_id:\n        input.operation_id ?? null,\n\n      failure_finalization_outcome:\n        input.failure_finalization_outcome ??\n        null,\n\n      operation_status:\n        input.final_operation_status ??\n        null,\n\n      approval_step_status:\n        input.final_step_status ??\n        null,\n\n      case_state:\n        input.final_case_state ??\n        null,\n    },\n  };\n}\n\nthrow new Error(\n  'Return Approval Failure Result received an invalid next action',\n);"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1216,
+        16
+      ],
+      "id": "a46338e9-9b7b-4faf-af51-71fab02f7334",
+      "name": "Return Approval Failure Result"
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "// Build the canonical WF99 explicit-internal envelope\n// for terminal or inconsistent WF04 approval failures.\n\nconst input = $json ?? {};\n\nconst UUID_PATTERN =\n  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;\n\nfunction optionalUuid(value) {\n  if (typeof value !== 'string') {\n    return null;\n  }\n\n  const normalized =\n    value.trim().toLowerCase();\n\n  return UUID_PATTERN.test(normalized)\n    ? normalized\n    : null;\n}\n\nfunction safeText(value, maximumLength = 1000) {\n  if (\n    value === null ||\n    value === undefined\n  ) {\n    return null;\n  }\n\n  const normalized =\n    String(value)\n      .replace(\n        /[\\u0000-\\u0008\\u000B\\u000C\\u000E-\\u001F\\u007F]/g,\n        ' ',\n      )\n      .replace(/\\s+/g, ' ')\n      .trim();\n\n  return normalized === ''\n    ? null\n    : normalized.slice(0, maximumLength);\n}\n\nconst terminalFailure =\n  input.next_action ===\n  'notify_terminal_failure';\n\nconst originalErrorClass =\n  safeText(\n    input.error_class,\n    120,\n  );\n\nlet errorCode =\n  'wf04_approval_failure_finalization_failed';\n\nif (terminalFailure) {\n  if (\n    originalErrorClass ===\n    'approval_response_timeout'\n  ) {\n    errorCode =\n      'wf04_approval_response_timeout';\n\n  } else if (\n    originalErrorClass ===\n    'gmail_send_failure'\n  ) {\n    errorCode =\n      'wf04_gmail_send_failure';\n\n  } else {\n    errorCode =\n      'wf04_invalid_approval_wait_result';\n  }\n}\n\nreturn {\n  json: {\n    source_variant:\n      'explicit_internal',\n\n    source_workflow_name:\n      'WF04 - Manual Approval',\n\n    source_workflow_id:\n      'I6nqXCOFa3qycHtY',\n\n    source_execution_id:\n      safeText(\n        $execution.id,\n        200,\n      ),\n\n    case_id:\n      optionalUuid(\n        input.case_id,\n      ),\n\n    correlation_id:\n      optionalUuid(\n        input.correlation_id,\n      ),\n\n    step_id:\n      optionalUuid(\n        input.approval_step_id,\n      ),\n\n    submission_id:\n      optionalUuid(\n        input.accepted_submission_id,\n      ),\n\n    external_operation_id:\n      optionalUuid(\n        input.operation_id,\n      ),\n\n    error_class:\n      terminalFailure\n        ? (\n            originalErrorClass ??\n            'approval_failure'\n          )\n        : 'workflow_contract_failure',\n\n    error_code:\n      errorCode,\n\n    error_message:\n      terminalFailure\n        ? (\n            safeText(\n              input.error_message,\n              1000,\n            ) ??\n            'WF04 manual approval failed terminally.'\n          )\n        : 'WF04 could not finalize the manual approval failure.',\n\n    retryable:\n      false,\n\n    severity:\n      terminalFailure\n        ? 'error'\n        : 'critical',\n\n    requires_intervention:\n      true,\n\n    error_details: {\n      next_action:\n        input.next_action ?? null,\n\n      approval_wait_outcome:\n        input.approval_wait_outcome ?? null,\n\n      failure_finalization_outcome:\n        input.failure_finalization_outcome ?? null,\n\n      operation_status:\n        input.final_operation_status ?? null,\n\n      approval_step_status:\n        input.final_step_status ?? null,\n\n      case_state:\n        input.final_case_state ?? null,\n\n      operation_attempt_count:\n        input.operation_attempt_count ?? null,\n\n      operation_max_attempts:\n        input.operation_max_attempts ?? null,\n\n      next_retry_at:\n        input.next_retry_at ?? null,\n    },\n  },\n};"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1280,
+        224
+      ],
+      "id": "afdf52b9-2549-441a-b848-ec79a9b7fb97",
+      "name": "Build WF04 Failure Intervention Context"
     }
   ],
   "connections": {
@@ -650,6 +996,16 @@
       "main": [
         [
           {
+            "node": "Merge Approval Response Context",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Merge Approval Failure Context",
+            "type": "main",
+            "index": 0
+          },
+          {
             "node": "Send Approval and Wait",
             "type": "main",
             "index": 0
@@ -661,9 +1017,16 @@
       "main": [
         [
           {
-            "node": "Normalize Approval Response",
+            "node": "Merge Approval Response Context",
             "type": "main",
             "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Merge Approval Failure Context",
+            "type": "main",
+            "index": 1
           }
         ]
       ]
@@ -672,7 +1035,7 @@
       "main": [
         [
           {
-            "node": "Finalize Approval Decision",
+            "node": "Route Approval Wait Outcome",
             "type": "main",
             "index": 0
           }
@@ -755,6 +1118,150 @@
           }
         ]
       ]
+    },
+    "Route Approval Wait Outcome": {
+      "main": [
+        [
+          {
+            "node": "Finalize Approval Decision",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Prepare Approval Failure Finalization",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Prepare Approval Failure Finalization",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Prepare Approval Failure Finalization",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Prepare Approval Failure Finalization",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Merge Approval Response Context": {
+      "main": [
+        [
+          {
+            "node": "Normalize Approval Response",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Merge Approval Failure Context": {
+      "main": [
+        [
+          {
+            "node": "Normalize Approval Response",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare Approval Failure Finalization": {
+      "main": [
+        [
+          {
+            "node": "Finalize Approval Failure",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Finalize Approval Failure": {
+      "main": [
+        [
+          {
+            "node": "Normalize Approval Failure Finalization",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Normalize Approval Failure Finalization": {
+      "main": [
+        [
+          {
+            "node": "Route Approval Failure Finalization",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Route Approval Failure Finalization": {
+      "main": [
+        [
+          {
+            "node": "Return Approval Failure Result",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Return Approval Failure Result",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Build WF04 Failure Intervention Context",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Build WF04 Failure Intervention Context",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Build WF04 Failure Intervention Context",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build WF04 Failure Intervention Context": {
+      "main": [
+        [
+          {
+            "node": "Dispatch WF04 Intervention to WF99",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
     }
   },
   "settings": {
@@ -768,9 +1275,9 @@
   },
   "nodeGroups": [],
   "pinData": {},
-  "versionId": "ad02f606-dd59-443a-8863-c1872810285b",
+  "versionId": "f88b30b2-55d2-46b0-a315-6f62bb0ca080",
   "activeVersionId": "e43638c6-18ba-41fc-b8a8-5e2ceaf213fe",
-  "versionCounter": 145,
+  "versionCounter": 297,
   "triggerCount": 1,
   "sourceWorkflowId": null,
   "tags": [],
