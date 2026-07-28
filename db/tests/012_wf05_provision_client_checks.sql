@@ -288,6 +288,169 @@ DECLARE
     v_submission_id uuid;
     v_client_id uuid;
 
+    v_invalid jsonb;
+    v_prepare jsonb;
+    v_duplicate jsonb;
+
+    v_operation_id uuid;
+    v_operation_count integer;
+    v_case_state text;
+    v_step_status text;
+    v_operation_status text;
+    v_operation_attempt_count integer;
+BEGIN
+    SELECT fixture.*
+    INTO
+        v_case_id,
+        v_correlation_id,
+        v_submission_id,
+        v_client_id
+    FROM pg_temp.create_wf05_test_case(
+        'missing-initial-' ||
+        gen_random_uuid()::text
+    ) AS fixture;
+
+    SELECT prepare_wf05_provision_client(
+        v_case_id,
+        v_correlation_id,
+        'wf98',
+        NULL,
+        NULL,
+        NULL,
+        'missing-initial-invalid',
+        NULL,
+        300,
+        5
+    )
+    INTO v_invalid;
+
+    IF v_invalid ->> 'preparation_outcome'
+            IS DISTINCT FROM
+            'invalid_internal_invocation'
+    THEN
+        RAISE EXCEPTION
+            'WF98 accepted an incomplete missing-initial invocation: %',
+            v_invalid;
+    END IF;
+
+    SELECT COUNT(*)
+    INTO v_operation_count
+    FROM external_operations
+    WHERE case_id = v_case_id
+      AND operation_type =
+          'provision_client';
+
+    IF v_operation_count <> 0 THEN
+        RAISE EXCEPTION
+            'Invalid missing-initial invocation created an operation';
+    END IF;
+
+    SELECT prepare_wf05_provision_client(
+        v_case_id,
+        v_correlation_id,
+        'wf98',
+        NULL,
+        NULL,
+        NULL,
+        'missing-initial-execution-1',
+        'success',
+        300,
+        5
+    )
+    INTO v_prepare;
+
+    IF v_prepare ->> 'preparation_outcome'
+            IS DISTINCT FROM 'ready_to_call'
+        OR v_prepare ->> 'operation_claim_outcome'
+            IS DISTINCT FROM 'claimed'
+        OR v_prepare ->> 'scenario'
+            IS DISTINCT FROM 'success'
+        OR (v_prepare
+            ->> 'operation_attempt_count')::integer
+            IS DISTINCT FROM 1
+        OR v_prepare ->> 'case_state'
+            IS DISTINCT FROM 'provisioning'
+    THEN
+        RAISE EXCEPTION
+            'Unexpected WF98 missing-initial preparation: %',
+            v_prepare;
+    END IF;
+
+    v_operation_id :=
+        (v_prepare ->> 'operation_id')::uuid;
+
+    SELECT prepare_wf05_provision_client(
+        v_case_id,
+        v_correlation_id,
+        'wf98',
+        NULL,
+        NULL,
+        NULL,
+        'missing-initial-execution-2',
+        'success',
+        300,
+        5
+    )
+    INTO v_duplicate;
+
+    IF v_duplicate ->> 'preparation_outcome'
+            IS DISTINCT FROM 'busy'
+    THEN
+        RAISE EXCEPTION
+            'Duplicate WF98 missing-initial invocation was not busy: %',
+            v_duplicate;
+    END IF;
+
+    SELECT state
+    INTO v_case_state
+    FROM onboarding_cases
+    WHERE id = v_case_id;
+
+    SELECT status
+    INTO v_step_status
+    FROM onboarding_steps
+    WHERE case_id = v_case_id
+      AND step_type = 'provision_client';
+
+    SELECT
+        status,
+        attempt_count
+    INTO STRICT
+        v_operation_status,
+        v_operation_attempt_count
+    FROM external_operations
+    WHERE id = v_operation_id;
+
+    SELECT COUNT(*)
+    INTO v_operation_count
+    FROM external_operations
+    WHERE case_id = v_case_id
+      AND operation_type =
+          'provision_client';
+
+    IF v_case_state <> 'provisioning'
+        OR v_step_status <> 'in_progress'
+        OR v_operation_status <> 'in_progress'
+        OR v_operation_attempt_count <> 1
+        OR v_operation_count <> 1
+    THEN
+        RAISE EXCEPTION
+            'Persisted missing-initial recovery state is inconsistent';
+    END IF;
+
+    RAISE NOTICE
+        'PASS: WF98 missing-initial dispatch creates one provisioning operation';
+END;
+$$;
+
+
+DO $$
+DECLARE
+    v_case_id uuid;
+    v_correlation_id uuid;
+    v_submission_id uuid;
+    v_client_id uuid;
+
     v_prepare jsonb;
     v_busy jsonb;
     v_finalize jsonb;

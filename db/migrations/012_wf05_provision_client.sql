@@ -27,6 +27,7 @@ DECLARE
     v_claim record;
 
     v_operation_found boolean := false;
+    v_missing_initial_dispatch boolean := false;
     v_idempotency_key text;
     v_lease_owner text;
     v_company_identifier text;
@@ -106,7 +107,8 @@ BEGIN
             );
         END IF;
 
-        IF p_scenario NOT IN (
+        IF p_scenario IS NULL
+            OR p_scenario NOT IN (
             'success',
             'retryable_once',
             'retryable_always',
@@ -121,11 +123,11 @@ BEGIN
                 p_case_id
             );
         END IF;
+
+        v_missing_initial_dispatch := false;
     ELSE
-        IF p_external_operation_id IS NULL
-            OR p_client_id IS NOT NULL
+        IF p_client_id IS NOT NULL
             OR p_accepted_submission_id IS NOT NULL
-            OR p_scenario IS NOT NULL
         THEN
             RETURN jsonb_build_object(
                 'preparation_outcome',
@@ -135,6 +137,41 @@ BEGIN
                 'case_id',
                 p_case_id
             );
+        END IF;
+
+        IF p_external_operation_id IS NULL THEN
+            IF p_scenario IS NULL
+                OR p_scenario NOT IN (
+                    'success',
+                    'retryable_once',
+                    'retryable_always',
+                    'terminal'
+                )
+            THEN
+                RETURN jsonb_build_object(
+                    'preparation_outcome',
+                    'invalid_internal_invocation',
+                    'error_code',
+                    'invalid_wf98_invocation',
+                    'case_id',
+                    p_case_id
+                );
+            END IF;
+
+            v_missing_initial_dispatch := true;
+        ELSE
+            IF p_scenario IS NOT NULL THEN
+                RETURN jsonb_build_object(
+                    'preparation_outcome',
+                    'invalid_internal_invocation',
+                    'error_code',
+                    'invalid_wf98_invocation',
+                    'case_id',
+                    p_case_id
+                );
+            END IF;
+
+            v_missing_initial_dispatch := false;
         END IF;
     END IF;
 
@@ -337,6 +374,7 @@ BEGIN
     v_operation_found := FOUND;
 
     IF p_trigger_source = 'wf98'
+        AND NOT v_missing_initial_dispatch
         AND (
             NOT v_operation_found
             OR v_operation.id
@@ -426,7 +464,10 @@ BEGIN
         );
     END IF;
 
-    IF p_trigger_source = 'wf04'
+    IF (
+        p_trigger_source = 'wf04'
+        OR v_missing_initial_dispatch
+    )
         AND v_case.state <> 'approved'
     THEN
         RETURN jsonb_build_object(
@@ -444,6 +485,7 @@ BEGIN
     END IF;
 
     IF p_trigger_source = 'wf98'
+        AND NOT v_missing_initial_dispatch
         AND v_case.state NOT IN (
             'provisioning_failed',
             'provisioning'
@@ -536,7 +578,9 @@ BEGIN
         );
     END IF;
 
-    IF p_trigger_source = 'wf98' THEN
+    IF p_trigger_source = 'wf98'
+        AND NOT v_missing_initial_dispatch
+    THEN
         IF v_operation.request_summary IS NULL
             OR jsonb_typeof(
                 v_operation.request_summary
@@ -652,6 +696,7 @@ BEGIN
     ) AS claim_result;
 
     IF p_trigger_source = 'wf98'
+        AND NOT v_missing_initial_dispatch
         AND v_claim.operation_id
             IS DISTINCT FROM
             p_external_operation_id
