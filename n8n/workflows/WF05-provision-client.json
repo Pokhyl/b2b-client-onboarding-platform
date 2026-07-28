@@ -1,5 +1,5 @@
 {
-  "updatedAt": "2026-07-27T18:36:46.928Z",
+  "updatedAt": "2026-07-28T05:46:10.887Z",
   "createdAt": "2026-07-19T17:57:39.335Z",
   "id": "1nU3HodQoHZJPuHX",
   "name": "WF05 - Provision Client",
@@ -14,8 +14,8 @@
       "type": "n8n-nodes-base.executeWorkflowTrigger",
       "typeVersion": 1.2,
       "position": [
-        -912,
-        80
+        -1664,
+        -288
       ],
       "id": "1cd02893-ad8f-4c73-8813-6c1dcd16184b",
       "name": "Internal Invocation Trigger"
@@ -34,8 +34,8 @@
       "type": "n8n-nodes-base.webhook",
       "typeVersion": 2.1,
       "position": [
-        -912,
-        -96
+        -1648,
+        -64
       ],
       "id": "a07f4c37-2357-4bb2-98a2-fd88bf61eb6b",
       "name": "Webhook",
@@ -262,7 +262,7 @@
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.4,
       "position": [
-        496,
+        2816,
         160
       ],
       "id": "972f51b5-6be2-4181-b3ac-bd747d9ebf7b",
@@ -273,6 +273,414 @@
           "name": "Header Auth account"
         }
       }
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "// Build the exact request allowed by the provisioning provider contract.\n// Preserve the authoritative WF05 context for the following nodes.\n\nconst input = $json ?? {};\n\nfunction requireText(value, fieldName) {\n  const normalized = String(value ?? '').trim();\n\n  if (normalized === '') {\n    throw new Error(\n      `${fieldName} must not be blank`,\n    );\n  }\n\n  return normalized;\n}\n\nif (input.next_action !== 'call_provider') {\n  throw new Error(\n    'Build Provisioning API Request received an invalid next action',\n  );\n}\n\nconst caseId = requireText(\n  input.case_id,\n  'case_id',\n);\n\nconst providerUrl = requireText(\n  input.provider_url,\n  'provider_url',\n);\n\nconst idempotencyKey = requireText(\n  input.idempotency_key,\n  'idempotency_key',\n);\n\nconst companyName = requireText(\n  input.company_name,\n  'company_name',\n);\n\nconst companyIdentifier = requireText(\n  input.company_identifier,\n  'company_identifier',\n);\n\nconst scenario = requireText(\n  input.scenario,\n  'scenario',\n);\n\nconst allowedScenarios = new Set([\n  'success',\n  'retryable_once',\n  'retryable_always',\n  'terminal',\n]);\n\nif (!allowedScenarios.has(scenario)) {\n  throw new Error(\n    'scenario is not supported by the provisioning provider',\n  );\n}\n\nreturn {\n  json: {\n    ...input,\n\n    provider_url:\n      providerUrl,\n\n    idempotency_key:\n      idempotencyKey,\n\n    provider_request_body: {\n      caseId,\n      companyName,\n      companyIdentifier,\n      scenario,\n    },\n\n    provider_request_started_at:\n      new Date().toISOString(),\n  },\n};"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        192,
+        -256
+      ],
+      "id": "17a78096-beaa-482e-b646-4a581a190e90",
+      "name": "Build Provisioning API Request"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $json.provider_url }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Idempotency-Key",
+              "value": "={{ $json.idempotency_key }}"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ $json.provider_request_body }}",
+        "options": {
+          "response": {
+            "response": {
+              "fullResponse": true,
+              "neverError": true,
+              "responseFormat": "json"
+            }
+          },
+          "timeout": 30000
+        }
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [
+        464,
+        -192
+      ],
+      "id": "dd91a909-2031-4ac4-95aa-dce1c2ff88b4",
+      "name": "Call Mock Provisioning API",
+      "onError": "continueErrorOutput"
+    },
+    {
+      "parameters": {
+        "mode": "combine",
+        "combineBy": "combineByPosition",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.merge",
+      "typeVersion": 3.2,
+      "position": [
+        784,
+        -240
+      ],
+      "id": "a389c41a-0258-4087-905a-e0580b36a92e",
+      "name": "Merge Provider Success Context"
+    },
+    {
+      "parameters": {
+        "mode": "combine",
+        "combineBy": "combineByPosition",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.merge",
+      "typeVersion": 3.2,
+      "position": [
+        784,
+        -416
+      ],
+      "id": "90f3d9f4-6aa4-4f02-b3a0-1d2a73d435aa",
+      "name": "Merge Provider Error Context"
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "// Normalize every provisioning provider outcome into one WF05 contract.\n// The input contains both the authoritative WF05 context and either\n// an HTTP response or a transport-level error.\n\nconst input = $json ?? {};\n\nfunction isPlainObject(value) {\n  return (\n    value !== null &&\n    typeof value === 'object' &&\n    !Array.isArray(value)\n  );\n}\n\nfunction optionalText(value) {\n  if (value === null || value === undefined) {\n    return null;\n  }\n\n  const normalized = String(value).trim();\n\n  return normalized === ''\n    ? null\n    : normalized;\n}\n\nfunction optionalPositiveInteger(value) {\n  if (\n    value === null ||\n    value === undefined ||\n    String(value).trim() === ''\n  ) {\n    return null;\n  }\n\n  const parsed = Number(value);\n\n  return (\n    Number.isInteger(parsed) &&\n    parsed > 0\n  )\n    ? parsed\n    : null;\n}\n\nfunction optionalNonNegativeInteger(value) {\n  if (\n    value === null ||\n    value === undefined ||\n    String(value).trim() === ''\n  ) {\n    return null;\n  }\n\n  const parsed = Number(value);\n\n  return (\n    Number.isInteger(parsed) &&\n    parsed >= 0\n  )\n    ? parsed\n    : null;\n}\n\nfunction getHeader(headers, requestedName) {\n  if (!isPlainObject(headers)) {\n    return null;\n  }\n\n  const requested =\n    requestedName.toLowerCase();\n\n  for (const [name, value] of Object.entries(headers)) {\n    if (name.toLowerCase() === requested) {\n      return value;\n    }\n  }\n\n  return null;\n}\n\nconst missingContextFields = [\n  'case_id',\n  'operation_id',\n  'lease_owner',\n  'company_name',\n  'company_identifier',\n].filter(\n  fieldName =>\n    optionalText(input[fieldName]) === null,\n);\n\nif (missingContextFields.length > 0) {\n  return {\n    json: {\n      ...input,\n\n      workflow:\n        'WF05',\n\n      provider_outcome:\n        'invalid_internal_context',\n\n      next_action:\n        'operator_intervention_required',\n\n      error_class:\n        'workflow_contract_failure',\n\n      error_code:\n        'wf05_provider_context_missing',\n\n      error_message:\n        `Missing WF05 provider context fields: ${missingContextFields.join(', ')}`,\n\n      retryable:\n        false,\n    },\n  };\n}\n\nconst statusCode =\n  optionalPositiveInteger(\n    input.statusCode ??\n    input.status_code ??\n    input.response?.statusCode,\n  );\n\nconst responseBody =\n  isPlainObject(input.body)\n    ? input.body\n    : isPlainObject(input.response?.body)\n      ? input.response.body\n      : {};\n\nconst responseHeaders =\n  isPlainObject(input.headers)\n    ? input.headers\n    : isPlainObject(input.response?.headers)\n      ? input.response.headers\n      : {};\n\nconst providerError =\n  isPlainObject(responseBody.error)\n    ? responseBody.error\n    : {};\n\nconst transportError =\n  isPlainObject(input.error)\n    ? input.error\n    : {};\n\nconst retryAfterSeconds =\n  optionalNonNegativeInteger(\n    getHeader(\n      responseHeaders,\n      'retry-after',\n    ),\n  );\n\nconst providerAttemptNumber =\n  optionalPositiveInteger(\n    responseBody.attemptNumber ??\n    providerError.attemptNumber,\n  );\n\nconst responseReceivedAt =\n  new Date().toISOString();\n\n// A transport failure means that no valid HTTP response was received.\nif (\n  statusCode === null &&\n  (\n    Object.keys(transportError).length > 0 ||\n    optionalText(input.error) !== null ||\n    optionalText(input.message) !== null\n  )\n) {\n  return {\n    json: {\n      ...input,\n\n      workflow:\n        'WF05',\n\n      provider_outcome:\n        'transport_failure',\n\n      next_action:\n        'finalize_retryable_failure',\n\n      http_status:\n        null,\n\n      error_class:\n        'provider_transport_failure',\n\n      error_code:\n        optionalText(\n          transportError.code ??\n          input.code,\n        ) ??\n        'PROVISIONING_TRANSPORT_FAILURE',\n\n      error_message:\n        optionalText(\n          transportError.message ??\n          transportError.description ??\n          input.message ??\n          input.error,\n        ) ??\n        'The provisioning provider could not be reached.',\n\n      retryable:\n        true,\n\n      provider_attempt_number:\n        providerAttemptNumber,\n\n      provider_retry_after_seconds:\n        retryAfterSeconds,\n\n      provider_response_received_at:\n        responseReceivedAt,\n    },\n  };\n}\n\n// Validate HTTP 200 and HTTP 201 as provisioning success responses.\nif (\n  statusCode === 200 ||\n  statusCode === 201\n) {\n  const externalClientId =\n    optionalText(\n      responseBody.externalClientId,\n    );\n\n  const responseCaseId =\n    optionalText(\n      responseBody.caseId,\n    );\n\n  const responseCompanyName =\n    optionalText(\n      responseBody.companyName,\n    );\n\n  const responseCompanyIdentifier =\n    optionalText(\n      responseBody.companyIdentifier,\n    );\n\n  const providerStatus =\n    optionalText(\n      responseBody.status,\n    );\n\n  const replayed =\n    typeof responseBody.replayed === 'boolean'\n      ? responseBody.replayed\n      : null;\n\n  const successResponseValid =\n    externalClientId !== null &&\n    responseCaseId === input.case_id &&\n    responseCompanyName === input.company_name &&\n    responseCompanyIdentifier ===\n      input.company_identifier &&\n    providerStatus === 'provisioned' &&\n    providerAttemptNumber !== null &&\n    replayed !== null &&\n    (\n      (\n        statusCode === 200 &&\n        replayed === true\n      ) ||\n      (\n        statusCode === 201 &&\n        replayed === false\n      )\n    );\n\n  if (successResponseValid) {\n    return {\n      json: {\n        ...input,\n\n        workflow:\n          'WF05',\n\n        provider_outcome:\n          'provisioned',\n\n        next_action:\n          'finalize_success',\n\n        http_status:\n          statusCode,\n\n        external_client_id:\n          externalClientId,\n\n        response_case_id:\n          responseCaseId,\n\n        response_company_name:\n          responseCompanyName,\n\n        response_company_identifier:\n          responseCompanyIdentifier,\n\n        provider_status:\n          providerStatus,\n\n        provider_attempt_number:\n          providerAttemptNumber,\n\n        replayed,\n\n        retryable:\n          false,\n\n        provider_response_received_at:\n          responseReceivedAt,\n      },\n    };\n  }\n\n  return {\n    json: {\n      ...input,\n\n      workflow:\n        'WF05',\n\n      provider_outcome:\n        'invalid_success_response',\n\n      next_action:\n        'finalize_terminal_failure',\n\n      http_status:\n        statusCode,\n\n      error_class:\n        'provider_contract_failure',\n\n      error_code:\n        'INVALID_PROVISIONING_SUCCESS_RESPONSE',\n\n      error_message:\n        'The provisioning provider returned an invalid success response.',\n\n      retryable:\n        false,\n\n      provider_attempt_number:\n        providerAttemptNumber,\n\n      provider_retry_after_seconds:\n        null,\n\n      provider_response_received_at:\n        responseReceivedAt,\n    },\n  };\n}\n\nconst providerMarkedRetryable =\n  providerError.retryable === true;\n\nconst retryableHttpStatus =\n  statusCode === 408 ||\n  statusCode === 425 ||\n  statusCode === 429 ||\n  (\n    statusCode !== null &&\n    statusCode >= 500\n  );\n\nconst retryable =\n  providerMarkedRetryable ||\n  retryableHttpStatus;\n\nreturn {\n  json: {\n    ...input,\n\n    workflow:\n      'WF05',\n\n    provider_outcome:\n      retryable\n        ? 'retryable_failure'\n        : 'terminal_failure',\n\n    next_action:\n      retryable\n        ? 'finalize_retryable_failure'\n        : 'finalize_terminal_failure',\n\n    http_status:\n      statusCode,\n\n    error_class:\n      retryable\n        ? 'provider_temporary_failure'\n        : 'provider_terminal_failure',\n\n    error_code:\n      optionalText(\n        providerError.code,\n      ) ??\n      (\n        retryable\n          ? 'PROVISIONING_TEMPORARILY_UNAVAILABLE'\n          : 'PROVISIONING_REJECTED'\n      ),\n\n    error_message:\n      optionalText(\n        providerError.message ??\n        responseBody.message,\n      ) ??\n      (\n        retryable\n          ? 'The provisioning provider returned a temporary failure.'\n          : 'The provisioning provider returned a terminal failure.'\n      ),\n\n    retryable,\n\n    provider_attempt_number:\n      providerAttemptNumber,\n\n    provider_retry_after_seconds:\n      retryAfterSeconds,\n\n    provider_response_received_at:\n      responseReceivedAt,\n  },\n};"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1104,
+        -336
+      ],
+      "id": "761225e3-6628-40a2-b778-d7acbfff1531",
+      "name": "Normalize Provisioning Provider Result"
+    },
+    {
+      "parameters": {
+        "rules": {
+          "values": [
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 3
+                },
+                "conditions": [
+                  {
+                    "leftValue": "={{ $json.next_action }}",
+                    "rightValue": "finalize_success",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    },
+                    "id": "a44a6b91-902d-4d3b-b8a4-d55b43871683"
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "finalize_success"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 3
+                },
+                "conditions": [
+                  {
+                    "id": "39fc79e2-7a79-426e-aab7-0232e497b92c",
+                    "leftValue": "={{ $json.next_action }}",
+                    "rightValue": "finalize_retryable_failure",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals",
+                      "name": "filter.operator.equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "finalize_retryable_failure"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 3
+                },
+                "conditions": [
+                  {
+                    "id": "39316392-269e-4101-88cb-ac7892278ab5",
+                    "leftValue": "={{ $json.next_action }}",
+                    "rightValue": "finalize_terminal_failure",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals",
+                      "name": "filter.operator.equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "finalize_terminal_failure"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 3
+                },
+                "conditions": [
+                  {
+                    "id": "9337c2f3-a91c-4f9f-80c6-5d1537dd4e6b",
+                    "leftValue": "={{ $json.next_action }}",
+                    "rightValue": "operator_intervention_required",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals",
+                      "name": "filter.operator.equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "operator_intervention_required"
+            }
+          ]
+        },
+        "options": {
+          "fallbackOutput": "extra"
+        }
+      },
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 3.4,
+      "position": [
+        1312,
+        -336
+      ],
+      "id": "abbe72b0-586a-46df-8bc9-1c2fd5698be5",
+      "name": "Route Provisioning Provider Result"
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT\n    $12::jsonb AS input_context,\n    finalize_wf05_provision_success(\n        $1::uuid,\n        $2::uuid,\n        $3::text,\n        $4::integer,\n        $5::text,\n        $6::uuid,\n        $7::text,\n        $8::text,\n        $9::text,\n        $10::integer,\n        $11::boolean\n    ) AS finalization_result;",
+        "options": {
+          "queryReplacement": "={{ [   $json.case_id,   $json.operation_id,   $json.lease_owner,   $json.http_status,   $json.external_client_id,   $json.response_case_id,   $json.response_company_name,   $json.response_company_identifier,   $json.provider_status,   $json.provider_attempt_number,   $json.replayed,   JSON.stringify($json) ] }}"
+        }
+      },
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        1632,
+        -656
+      ],
+      "id": "7a2d37c7-c893-4f77-9849-e7f2dbd962ad",
+      "name": "Finalize Provisioning Success",
+      "credentials": {
+        "postgres": {
+          "id": "zU4wPvkQFRBSwH0b",
+          "name": "B2B Onboarding App DB"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT\n    $11::jsonb AS input_context,\n    finalize_wf05_provision_failure(\n        $1::uuid,\n        $2::uuid,\n        $3::text,\n        $4::boolean,\n        $5::text,\n        $6::text,\n        $7::text,\n        $8::integer,\n        $9::integer,\n        $10::integer\n    ) AS finalization_result;",
+        "options": {
+          "queryReplacement": "={{ [   $json.case_id,   $json.operation_id,   $json.lease_owner,   $json.retryable,   $json.error_class,   $json.error_code,   $json.error_message,   $json.http_status,   $json.provider_attempt_number,   $json.provider_retry_after_seconds,   JSON.stringify($json) ] }}"
+        }
+      },
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        1632,
+        -464
+      ],
+      "id": "07111b14-72e3-455b-8141-9c4a68cde06f",
+      "name": "Finalize Provisioning Failure",
+      "credentials": {
+        "postgres": {
+          "id": "zU4wPvkQFRBSwH0b",
+          "name": "B2B Onboarding App DB"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "// Normalize both success and failure PostgreSQL finalization results\n// into one routing contract.\n\nconst row = $json ?? {};\n\nfunction isPlainObject(value) {\n  return (\n    value !== null &&\n    typeof value === 'object' &&\n    !Array.isArray(value)\n  );\n}\n\nfunction requireText(value, fieldName) {\n  const normalized = String(value ?? '').trim();\n\n  if (normalized === '') {\n    throw new Error(\n      `${fieldName} must not be blank`,\n    );\n  }\n\n  return normalized;\n}\n\nfunction optionalText(value) {\n  if (\n    value === null ||\n    value === undefined\n  ) {\n    return null;\n  }\n\n  const normalized = String(value).trim();\n\n  return normalized === ''\n    ? null\n    : normalized;\n}\n\nif (!isPlainObject(row.input_context)) {\n  throw new Error(\n    'input_context must be a JSON object',\n  );\n}\n\nif (!isPlainObject(row.finalization_result)) {\n  throw new Error(\n    'finalization_result must be a JSON object',\n  );\n}\n\nconst inputContext =\n  row.input_context;\n\nconst result =\n  row.finalization_result;\n\nconst finalizationOutcome = requireText(\n  result.finalization_outcome,\n  'finalization_outcome',\n);\n\nconst caseState =\n  optionalText(result.case_state);\n\nconst operationStatus =\n  optionalText(result.operation_status);\n\nconst provisionStepStatus =\n  optionalText(result.provision_step_status);\n\nlet nextAction;\n\nif (\n  finalizationOutcome === 'finalized' ||\n  finalizationOutcome === 'already_finalized'\n) {\n  if (\n    caseState === 'provisioned' &&\n    operationStatus === 'succeeded' &&\n    provisionStepStatus === 'completed'\n  ) {\n    nextAction =\n      'return_success';\n\n  } else if (\n    caseState === 'provisioning_failed' &&\n    operationStatus === 'failed_retryable' &&\n    provisionStepStatus === 'failed_retryable'\n  ) {\n    nextAction =\n      'return_retry_scheduled';\n\n  } else if (\n    caseState === 'provisioning_failed' &&\n    operationStatus === 'failed_terminal' &&\n    provisionStepStatus === 'failed_terminal'\n  ) {\n    nextAction =\n      'operator_intervention_required';\n\n  } else {\n    nextAction =\n      'operator_intervention_required';\n  }\n\n} else {\n  nextAction =\n    'operator_intervention_required';\n}\n\nreturn {\n  json: {\n    ...inputContext,\n    ...result,\n\n    workflow:\n      'WF05',\n\n    finalization_outcome:\n      finalizationOutcome,\n\n    next_action:\n      nextAction,\n  },\n};"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1872,
+        -576
+      ],
+      "id": "2cc0dd3c-c2b7-4f1b-9608-284e77cd5982",
+      "name": "Normalize WF05 Finalization"
+    },
+    {
+      "parameters": {
+        "rules": {
+          "values": [
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 3
+                },
+                "conditions": [
+                  {
+                    "leftValue": "={{ $json.next_action }}",
+                    "rightValue": "return_success",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    },
+                    "id": "dd0857fc-9183-4ef9-938c-ee600bb4ecc1"
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "return_success"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 3
+                },
+                "conditions": [
+                  {
+                    "id": "c82812ee-8e38-4b65-99fb-600cfefd4539",
+                    "leftValue": "={{ $json.next_action }}",
+                    "rightValue": "return_retry_scheduled",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals",
+                      "name": "filter.operator.equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "return_retry_scheduled"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 3
+                },
+                "conditions": [
+                  {
+                    "id": "da07f7c7-0e9e-4d77-8bb3-170b5412805d",
+                    "leftValue": "={{ $json.next_action }}",
+                    "rightValue": "operator_intervention_required",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals",
+                      "name": "filter.operator.equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "operator_intervention_required"
+            }
+          ]
+        },
+        "options": {
+          "fallbackOutput": "extra"
+        }
+      },
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 3.4,
+      "position": [
+        2080,
+        -576
+      ],
+      "id": "b1be4887-1541-47c3-bf4c-478daad28821",
+      "name": "Route WF05 Finalization"
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "// Return the verified terminal success result of WF05.\n\nconst input = $json ?? {};\n\nif (input.next_action !== 'return_success') {\n  throw new Error(\n    'Return Provisioning Success Result received an invalid next action',\n  );\n}\n\nif (\n  input.case_state !== 'provisioned' ||\n  input.operation_status !== 'succeeded' ||\n  input.provision_step_status !== 'completed'\n) {\n  throw new Error(\n    'WF05 success result contains an inconsistent persisted state',\n  );\n}\n\nconst externalClientId =\n  String(\n    input.external_client_id ?? '',\n  ).trim();\n\nif (externalClientId === '') {\n  throw new Error(\n    'WF05 success result does not contain external_client_id',\n  );\n}\n\nreturn {\n  json: {\n    workflow:\n      'WF05',\n\n    result:\n      'provisioned',\n\n    case_id:\n      input.case_id ?? null,\n\n    correlation_id:\n      input.correlation_id ?? null,\n\n    client_id:\n      input.client_id ?? null,\n\n    accepted_submission_id:\n      input.accepted_submission_id ?? null,\n\n    operation_id:\n      input.operation_id ?? null,\n\n    external_client_id:\n      externalClientId,\n\n    case_state:\n      input.case_state,\n\n    operation_status:\n      input.operation_status,\n\n    provision_step_status:\n      input.provision_step_status,\n  },\n};"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2496,
+        -880
+      ],
+      "id": "5c315904-9ea9-48d9-b33e-9bf99b28cdea",
+      "name": "Return Provisioning Success Result"
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "// Return a controlled WF05 result after a retryable provider failure.\n\nconst input = $json ?? {};\n\nif (\n  input.next_action !==\n  'return_retry_scheduled'\n) {\n  throw new Error(\n    'Return Provisioning Retry Scheduled Result received an invalid next action',\n  );\n}\n\nif (\n  input.case_state !== 'provisioning_failed' ||\n  input.operation_status !== 'failed_retryable' ||\n  input.provision_step_status !== 'failed_retryable'\n) {\n  throw new Error(\n    'WF05 retry result contains an inconsistent persisted state',\n  );\n}\n\nconst nextRetryAt =\n  String(\n    input.next_retry_at ?? '',\n  ).trim();\n\nif (nextRetryAt === '') {\n  throw new Error(\n    'WF05 retryable result does not contain next_retry_at',\n  );\n}\n\nreturn {\n  json: {\n    workflow:\n      'WF05',\n\n    result:\n      'retry_scheduled',\n\n    case_id:\n      input.case_id ?? null,\n\n    correlation_id:\n      input.correlation_id ?? null,\n\n    operation_id:\n      input.operation_id ?? null,\n\n    case_state:\n      input.case_state,\n\n    operation_status:\n      input.operation_status,\n\n    provision_step_status:\n      input.provision_step_status,\n\n    next_retry_at:\n      nextRetryAt,\n  },\n};"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2496,
+        -688
+      ],
+      "id": "cfaabf05-214f-48ed-8084-f4a615cb3461",
+      "name": "Return Provisioning Retry Scheduled Result"
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "// Build the canonical WF99 envelope for provider or database\n// finalization failures in WF05.\n\nconst input = $json ?? {};\n\nif (\n  input.next_action !==\n    'operator_intervention_required' &&\n  input.next_action !== null &&\n  input.next_action !== undefined\n) {\n  throw new Error(\n    'Build WF05 Finalization Intervention Context received an invalid next action',\n  );\n}\n\nconst executionId =\n  String($execution.id ?? '').trim() ||\n  null;\n\nconst terminalProviderFailure =\n  input.operation_status ===\n    'failed_terminal' ||\n  input.next_action ===\n    'finalize_terminal_failure';\n\nreturn {\n  json: {\n    source_variant:\n      'explicit_internal',\n\n    source_workflow_name:\n      'WF05 - Provision Client',\n\n    source_workflow_id:\n      '1nU3HodQoHZJPuHX',\n\n    source_execution_id:\n      executionId,\n\n    case_id:\n      input.case_id ?? null,\n\n    correlation_id:\n      input.correlation_id ?? null,\n\n    step_id:\n      input.provision_step_id ?? null,\n\n    submission_id:\n      input.accepted_submission_id ?? null,\n\n    external_operation_id:\n      input.operation_id ?? null,\n\n    error_class:\n      input.error_class ??\n      (\n        terminalProviderFailure\n          ? 'provider_terminal_failure'\n          : 'workflow_contract_failure'\n      ),\n\n    error_code:\n      input.error_code ??\n      'wf05_provisioning_finalization_failed',\n\n    error_message:\n      input.error_message ??\n      'WF05 could not safely finalize client provisioning.',\n\n    retryable:\n      false,\n\n    severity:\n      'error',\n\n    requires_intervention:\n      true,\n\n    error_details: {\n      provider_outcome:\n        input.provider_outcome ?? null,\n\n      finalization_outcome:\n        input.finalization_outcome ?? null,\n\n      http_status:\n        input.http_status ?? null,\n\n      case_state:\n        input.case_state ?? null,\n\n      operation_status:\n        input.operation_status ?? null,\n\n      provision_step_status:\n        input.provision_step_status ?? null,\n\n      operation_attempt_count:\n        input.operation_attempt_count ?? null,\n\n      operation_max_attempts:\n        input.operation_max_attempts ?? null,\n\n      next_retry_at:\n        input.next_retry_at ?? null,\n    },\n  },\n};"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2528,
+        -256
+      ],
+      "id": "729a7b77-9e7a-46da-a58a-86f80530b8a7",
+      "name": "Build WF05 Finalization Intervention Context"
     }
   ],
   "connections": {
@@ -355,7 +763,13 @@
     },
     "Route Provisioning Preparation": {
       "main": [
-        [],
+        [
+          {
+            "node": "Build Provisioning API Request",
+            "type": "main",
+            "index": 0
+          }
+        ],
         [
           {
             "node": "Return Provisioning No Action Result",
@@ -389,6 +803,193 @@
           }
         ]
       ]
+    },
+    "Build Provisioning API Request": {
+      "main": [
+        [
+          {
+            "node": "Merge Provider Success Context",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Merge Provider Error Context",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Call Mock Provisioning API",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Merge Provider Success Context": {
+      "main": [
+        [
+          {
+            "node": "Normalize Provisioning Provider Result",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Call Mock Provisioning API": {
+      "main": [
+        [
+          {
+            "node": "Merge Provider Success Context",
+            "type": "main",
+            "index": 1
+          }
+        ],
+        [
+          {
+            "node": "Merge Provider Error Context",
+            "type": "main",
+            "index": 1
+          }
+        ]
+      ]
+    },
+    "Merge Provider Error Context": {
+      "main": [
+        [
+          {
+            "node": "Normalize Provisioning Provider Result",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Normalize Provisioning Provider Result": {
+      "main": [
+        [
+          {
+            "node": "Route Provisioning Provider Result",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Route Provisioning Provider Result": {
+      "main": [
+        [
+          {
+            "node": "Finalize Provisioning Success",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Finalize Provisioning Failure",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Finalize Provisioning Failure",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Build WF05 Finalization Intervention Context",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Build WF05 Finalization Intervention Context",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Finalize Provisioning Success": {
+      "main": [
+        [
+          {
+            "node": "Normalize WF05 Finalization",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Finalize Provisioning Failure": {
+      "main": [
+        [
+          {
+            "node": "Normalize WF05 Finalization",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Normalize WF05 Finalization": {
+      "main": [
+        [
+          {
+            "node": "Route WF05 Finalization",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Route WF05 Finalization": {
+      "main": [
+        [
+          {
+            "node": "Return Provisioning Success Result",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Return Provisioning Retry Scheduled Result",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Build WF05 Finalization Intervention Context",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Build WF05 Finalization Intervention Context",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build WF05 Finalization Intervention Context": {
+      "main": [
+        [
+          {
+            "node": "Dispatch WF05 Intervention to WF99",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
     }
   },
   "settings": {
@@ -405,9 +1006,9 @@
   },
   "nodeGroups": [],
   "pinData": {},
-  "versionId": "3e86bc83-a605-47ed-8f5a-c0f387575026",
+  "versionId": "9f82c896-01b7-4467-91d8-4ca1c28b850a",
   "activeVersionId": null,
-  "versionCounter": 15,
+  "versionCounter": 141,
   "triggerCount": 0,
   "sourceWorkflowId": null,
   "tags": [],
