@@ -1,0 +1,2807 @@
+[
+  {
+    "updatedAt": "2026-07-31T17:10:12.462Z",
+    "createdAt": "2026-07-19T17:58:11.984Z",
+    "id": "Rq9cHpFYeS8tqYPf",
+    "name": "WF06 - Finalize Onboarding",
+    "description": null,
+    "active": true,
+    "isArchived": false,
+    "nodes": [
+      {
+        "parameters": {
+          "inputSource": "passthrough"
+        },
+        "type": "n8n-nodes-base.executeWorkflowTrigger",
+        "typeVersion": 1.2,
+        "position": [
+          -2032,
+          -64
+        ],
+        "id": "e0fea8a4-38ed-4d32-a699-5155cb5b4aed",
+        "name": "Internal Invocation Trigger"
+      },
+      {
+        "parameters": {
+          "httpMethod": "POST",
+          "path": "internal/wf06-retry-dispatch",
+          "authentication": "headerAuth",
+          "options": {
+            "responseCode": {
+              "values": {}
+            }
+          }
+        },
+        "type": "n8n-nodes-base.webhook",
+        "typeVersion": 2.1,
+        "position": [
+          -2032,
+          -288
+        ],
+        "id": "f11d0aa7-4ca1-4cf6-925c-85af5b73d70c",
+        "name": "Webhook",
+        "webhookId": "0dc7c0f7-2786-41ab-95ad-8e6391748314",
+        "credentials": {
+          "httpHeaderAuth": {
+            "id": "vRGUhlaMi4SARvdN",
+            "name": "Header Auth account"
+          }
+        }
+      },
+      {
+        "parameters": {
+          "mode": "runOnceForEachItem",
+          "jsCode": "// Normalize direct sub-workflow input and the protected webhook envelope\n// into the same plain WF06 payload object.\n\nconst input = $json ?? {};\n\nconst payload =\n  input.body !== null &&\n  typeof input.body === 'object' &&\n  !Array.isArray(input.body)\n    ? input.body\n    : input;\n\nreturn {\n  json: payload,\n};"
+        },
+        "type": "n8n-nodes-base.code",
+        "typeVersion": 2,
+        "position": [
+          -1808,
+          -160
+        ],
+        "id": "291c16ed-22a4-4c91-92ca-015249b96a43",
+        "name": "Normalize Invocation Envelope"
+      },
+      {
+        "parameters": {
+          "mode": "runOnceForEachItem",
+          "jsCode": "// Validate the WF06 invocation before any database state is changed.\n\nconst input = $json;\n\nif (\n  input === null ||\n  typeof input !== 'object' ||\n  Array.isArray(input)\n) {\n  throw new Error('WF06 invocation must be a JSON object');\n}\n\nconst allowedFields = new Set([\n  'case_id',\n  'correlation_id',\n  'trigger_source',\n  'client_id',\n  'accepted_submission_id',\n  'external_client_id',\n  'external_operation_id',\n  'recovery_reason',\n]);\n\nconst unknownFields = Object.keys(input).filter(\n  (field) => !allowedFields.has(field),\n);\n\nif (unknownFields.length > 0) {\n  throw new Error(\n    `WF06 invocation contains unknown fields: ${unknownFields.join(', ')}`,\n  );\n}\n\nconst uuidPattern =\n  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;\n\nfunction requireUuid(value, fieldName) {\n  if (\n    typeof value !== 'string' ||\n    !uuidPattern.test(value)\n  ) {\n    throw new Error(\n      `WF06 ${fieldName} must be a valid UUID`,\n    );\n  }\n\n  return value.toLowerCase();\n}\n\nfunction optionalUuid(value, fieldName) {\n  if (value === undefined || value === null) {\n    return null;\n  }\n\n  return requireUuid(value, fieldName);\n}\n\nfunction requireNonEmptyString(value, fieldName) {\n  if (\n    typeof value !== 'string' ||\n    value.trim() === ''\n  ) {\n    throw new Error(\n      `WF06 ${fieldName} must be a non-empty string`,\n    );\n  }\n\n  return value.trim();\n}\n\nconst caseId = requireUuid(\n  input.case_id,\n  'case_id',\n);\n\nconst correlationId = requireUuid(\n  input.correlation_id,\n  'correlation_id',\n);\n\nif (\n  input.trigger_source !== 'wf05' &&\n  input.trigger_source !== 'wf98'\n) {\n  throw new Error(\n    'WF06 trigger_source must be either wf05 or wf98',\n  );\n}\n\nif (input.trigger_source === 'wf05') {\n  const clientId = requireUuid(\n    input.client_id,\n    'client_id',\n  );\n\n  const acceptedSubmissionId = requireUuid(\n    input.accepted_submission_id,\n    'accepted_submission_id',\n  );\n\n  const externalClientId = requireNonEmptyString(\n    input.external_client_id,\n    'external_client_id',\n  );\n\n  if (\n    input.external_operation_id !== undefined &&\n    input.external_operation_id !== null\n  ) {\n    throw new Error(\n      'WF06 wf05 invocation must not contain external_operation_id',\n    );\n  }\n\n  if (\n    input.recovery_reason !== undefined &&\n    input.recovery_reason !== null\n  ) {\n    throw new Error(\n      'WF06 wf05 invocation must not contain recovery_reason',\n    );\n  }\n\n  return {\n    json: {\n      case_id: caseId,\n      correlation_id: correlationId,\n      trigger_source: 'wf05',\n      client_id: clientId,\n      accepted_submission_id: acceptedSubmissionId,\n      external_client_id: externalClientId,\n      external_operation_id: null,\n      recovery_reason: null,\n    },\n  };\n}\n\nif (\n  input.client_id !== undefined &&\n  input.client_id !== null\n) {\n  throw new Error(\n    'WF06 wf98 invocation must not contain client_id',\n  );\n}\n\nif (\n  input.accepted_submission_id !== undefined &&\n  input.accepted_submission_id !== null\n) {\n  throw new Error(\n    'WF06 wf98 invocation must not contain accepted_submission_id',\n  );\n}\n\nif (\n  input.external_client_id !== undefined &&\n  input.external_client_id !== null\n) {\n  throw new Error(\n    'WF06 wf98 invocation must not contain external_client_id',\n  );\n}\n\nconst externalOperationId = optionalUuid(\n  input.external_operation_id,\n  'external_operation_id',\n);\n\nlet recoveryReason = null;\n\nif (\n  input.recovery_reason !== undefined &&\n  input.recovery_reason !== null\n) {\n  if (typeof input.recovery_reason !== 'string') {\n    throw new Error(\n      'WF06 recovery_reason must be a string',\n    );\n  }\n\n  recoveryReason = input.recovery_reason;\n}\n\nif (\n  externalOperationId !== null &&\n  recoveryReason !== null\n) {\n  throw new Error(\n    'WF06 wf98 invocation must not contain both external_operation_id and recovery_reason',\n  );\n}\n\nif (\n  externalOperationId === null &&\n  ![\n    'missing_initial_dispatch',\n    'resume_finalization',\n    'complete_finalization',\n  ].includes(recoveryReason)\n) {\n  throw new Error(\n    'WF06 wf98 invocation requires external_operation_id or a valid recovery_reason',\n  );\n}\n\nreturn {\n  json: {\n    case_id: caseId,\n    correlation_id: correlationId,\n    trigger_source: 'wf98',\n    client_id: null,\n    accepted_submission_id: null,\n    external_client_id: null,\n    external_operation_id: externalOperationId,\n    recovery_reason: recoveryReason,\n  },\n};"
+        },
+        "type": "n8n-nodes-base.code",
+        "typeVersion": 2,
+        "position": [
+          -1600,
+          -160
+        ],
+        "id": "12c0bc16-a8b5-4149-801a-726e3c76724a",
+        "name": "Validate WF06 Invocation"
+      },
+      {
+        "parameters": {
+          "mode": "runOnceForEachItem",
+          "jsCode": "// Build the WF06 runtime context used by PostgreSQL preparation.\n// Provider configuration remains outside the invocation payload.\n\nconst input = $json ?? {};\n\nfunction requireText(value, fieldName) {\n  const normalized = String(value ?? '').trim();\n\n  if (normalized === '') {\n    throw new Error(\n      `${fieldName} must not be blank`,\n    );\n  }\n\n  return normalized;\n}\n\nfunction optionalText(value) {\n  if (\n    value === null ||\n    value === undefined\n  ) {\n    return null;\n  }\n\n  const normalized = String(value).trim();\n\n  return normalized === ''\n    ? null\n    : normalized;\n}\n\nfunction optionalBoolean(value) {\n  const normalized = optionalText(value);\n\n  if (normalized === null) {\n    return null;\n  }\n\n  if (normalized.toLowerCase() === 'true') {\n    return true;\n  }\n\n  if (normalized.toLowerCase() === 'false') {\n    return false;\n  }\n\n  return null;\n}\n\nfunction optionalJsonArray(value) {\n  const normalized = optionalText(value);\n\n  if (normalized === null) {\n    return null;\n  }\n\n  try {\n    const parsed = JSON.parse(normalized);\n\n    return Array.isArray(parsed)\n      ? parsed\n      : null;\n  } catch {\n    return null;\n  }\n}\n\nconst executionId = requireText(\n  $execution.id,\n  'execution_id',\n);\n\nconst configuration = {\n  drive_parent_folder_id:\n    optionalText(\n      $env.GOOGLE_DRIVE_PARENT_FOLDER_ID,\n    ),\n\n  drive_use_shared_drive:\n    optionalBoolean(\n      $env.GOOGLE_DRIVE_USE_SHARED_DRIVE,\n    ),\n\n  drive_folder_name_template:\n    optionalText(\n      $env.WF06_DRIVE_FOLDER_NAME_TEMPLATE,\n    ),\n\n  calendar_id:\n    optionalText(\n      $env.GOOGLE_CALENDAR_ID,\n    ),\n\n  kickoff_timezone:\n    optionalText(\n      $env.KICKOFF_TIMEZONE,\n    ),\n\n  kickoff_delay_days:\n    optionalText(\n      $env.KICKOFF_DELAY_DAYS,\n    ),\n\n  kickoff_start_local_time:\n    optionalText(\n      $env.KICKOFF_START_LOCAL_TIME,\n    ),\n\n  kickoff_duration_minutes:\n    optionalText(\n      $env.KICKOFF_DURATION_MINUTES,\n    ),\n\n  kickoff_internal_attendee_email:\n    optionalText(\n      $env.KICKOFF_INTERNAL_ATTENDEE_EMAIL,\n    ),\n\n  team_notification_recipients:\n    optionalJsonArray(\n      $env.TEAM_NOTIFICATION_RECIPIENTS,\n    ),\n\n  team_notification_sender_name:\n    optionalText(\n      $env.TEAM_NOTIFICATION_SENDER_NAME,\n    ),\n\n  team_notification_template_key:\n    optionalText(\n      $env.TEAM_NOTIFICATION_TEMPLATE_KEY,\n    ),\n};\n\nreturn {\n  json: {\n    ...input,\n\n    execution_id:\n      executionId,\n\n    configuration,\n\n    lease_seconds:\n      300,\n\n    max_attempts:\n      5,\n  },\n};"
+        },
+        "type": "n8n-nodes-base.code",
+        "typeVersion": 2,
+        "position": [
+          -1392,
+          -160
+        ],
+        "id": "511224da-6104-4470-883f-923771593752",
+        "name": "Prepare WF06 Request Context"
+      },
+      {
+        "parameters": {
+          "operation": "executeQuery",
+          "query": "SELECT\n    $13::jsonb AS input_context,\n    prepare_wf06_finalization_operation(\n        $1::uuid,\n        $2::uuid,\n        $3::text,\n        $4::uuid,\n        $5::uuid,\n        $6::text,\n        $7::uuid,\n        $8::text,\n        $9::text,\n        $10::jsonb,\n        $11::integer,\n        $12::integer\n    ) AS preparation_result;",
+          "options": {
+            "queryReplacement": "={{ [   $json.case_id,   $json.correlation_id,   $json.trigger_source,   $json.client_id,   $json.accepted_submission_id,   $json.external_client_id,   $json.external_operation_id,   $json.recovery_reason,   $json.execution_id,   JSON.stringify($json.configuration),   $json.lease_seconds,   $json.max_attempts,   JSON.stringify($json) ] }}"
+          }
+        },
+        "type": "n8n-nodes-base.postgres",
+        "typeVersion": 2.6,
+        "position": [
+          -1184,
+          -160
+        ],
+        "id": "f11ce1a0-ebf9-4856-890d-1355bce1ec49",
+        "name": "Prepare Finalization Operation",
+        "credentials": {
+          "postgres": {
+            "id": "zU4wPvkQFRBSwH0b",
+            "name": "B2B Onboarding App DB"
+          }
+        }
+      },
+      {
+        "parameters": {
+          "mode": "runOnceForEachItem",
+          "jsCode": "// Normalize the authoritative PostgreSQL WF06 preparation result\n// before routing to an external operation, completion, no-action,\n// or operator intervention.\n\nconst row = $json ?? {};\n\nfunction isPlainObject(value) {\n  return (\n    value !== null &&\n    typeof value === 'object' &&\n    !Array.isArray(value)\n  );\n}\n\nfunction requireText(value, fieldName) {\n  const normalized = String(value ?? '').trim();\n\n  if (normalized === '') {\n    throw new Error(\n      `${fieldName} must not be blank`,\n    );\n  }\n\n  return normalized;\n}\n\nfunction optionalText(value) {\n  if (\n    value === null ||\n    value === undefined\n  ) {\n    return null;\n  }\n\n  const normalized = String(value).trim();\n\n  return normalized === ''\n    ? null\n    : normalized;\n}\n\nif (!isPlainObject(row.input_context)) {\n  throw new Error(\n    'WF06 input_context must be a JSON object',\n  );\n}\n\nif (!isPlainObject(row.preparation_result)) {\n  throw new Error(\n    'WF06 preparation_result must be a JSON object',\n  );\n}\n\nconst inputContext =\n  row.input_context;\n\nconst result =\n  row.preparation_result;\n\nconst preparationOutcome = requireText(\n  result.preparation_outcome,\n  'preparation_outcome',\n);\n\nlet nextAction;\n\nif (preparationOutcome === 'claimed') {\n  nextAction =\n    'process_operation';\n\n} else if (\n  preparationOutcome === 'ready_to_complete'\n) {\n  nextAction =\n    'complete_onboarding';\n\n} else if (\n  new Set([\n    'already_completed',\n    'not_required',\n    'busy',\n    'not_due',\n  ]).has(preparationOutcome)\n) {\n  nextAction =\n    'no_action';\n\n} else {\n  nextAction =\n    'operator_intervention_required';\n}\n\nif (nextAction === 'process_operation') {\n  const allowedOperationTypes =\n    new Set([\n      'create_drive_folder',\n      'create_kickoff_event',\n      'notify_team',\n    ]);\n\n  const operationType = requireText(\n    result.operation_type,\n    'operation_type',\n  );\n\n  if (!allowedOperationTypes.has(operationType)) {\n    throw new Error(\n      `WF06 received unsupported operation_type: ${operationType}`,\n    );\n  }\n\n  requireText(\n    result.operation_id,\n    'operation_id',\n  );\n\n  requireText(\n    result.lease_owner,\n    'lease_owner',\n  );\n\n  requireText(\n    result.lease_expires_at,\n    'lease_expires_at',\n  );\n\n  if (!isPlainObject(result.request_summary)) {\n    throw new Error(\n      'WF06 claimed operation must contain request_summary',\n    );\n  }\n\n  if (result.case_state !== 'finalizing') {\n    throw new Error(\n      'WF06 claimed operation must have case_state=finalizing',\n    );\n  }\n\n  if (result.operation_status !== 'in_progress') {\n    throw new Error(\n      'WF06 claimed operation must have operation_status=in_progress',\n    );\n  }\n}\n\nif (\n  nextAction === 'complete_onboarding' &&\n  result.case_state !== 'finalizing'\n) {\n  throw new Error(\n    'WF06 completion preparation must have case_state=finalizing',\n  );\n}\n\nreturn {\n  json: {\n    ...inputContext,\n    ...result,\n\n    workflow:\n      'WF06',\n\n    preparation_outcome:\n      preparationOutcome,\n\n    next_action:\n      nextAction,\n\n    error_code:\n      optionalText(result.error_code),\n  },\n};"
+        },
+        "type": "n8n-nodes-base.code",
+        "typeVersion": 2,
+        "position": [
+          -976,
+          -160
+        ],
+        "id": "13d2a3de-579e-43a4-9011-4adfc4d61458",
+        "name": "Normalize Finalization Preparation"
+      },
+      {
+        "parameters": {
+          "rules": {
+            "values": [
+              {
+                "conditions": {
+                  "options": {
+                    "caseSensitive": true,
+                    "leftValue": "",
+                    "typeValidation": "strict",
+                    "version": 3
+                  },
+                  "conditions": [
+                    {
+                      "leftValue": "={{ $json.next_action }}",
+                      "rightValue": "process_operation",
+                      "operator": {
+                        "type": "string",
+                        "operation": "equals"
+                      },
+                      "id": "97f7aa05-405d-43de-9404-e0125210a3ad"
+                    }
+                  ],
+                  "combinator": "and"
+                },
+                "renameOutput": true,
+                "outputKey": "process_operation"
+              },
+              {
+                "conditions": {
+                  "options": {
+                    "caseSensitive": true,
+                    "leftValue": "",
+                    "typeValidation": "strict",
+                    "version": 3
+                  },
+                  "conditions": [
+                    {
+                      "id": "605ba6c7-6017-4b44-aae8-0fb1807e6ec9",
+                      "leftValue": "={{ $json.next_action }}",
+                      "rightValue": "complete_onboarding",
+                      "operator": {
+                        "type": "string",
+                        "operation": "equals",
+                        "name": "filter.operator.equals"
+                      }
+                    }
+                  ],
+                  "combinator": "and"
+                },
+                "renameOutput": true,
+                "outputKey": "complete_onboarding"
+              },
+              {
+                "conditions": {
+                  "options": {
+                    "caseSensitive": true,
+                    "leftValue": "",
+                    "typeValidation": "strict",
+                    "version": 3
+                  },
+                  "conditions": [
+                    {
+                      "id": "e5b040e7-1123-4f1f-b868-bfa79334823b",
+                      "leftValue": "={{ $json.next_action }}",
+                      "rightValue": "no_action",
+                      "operator": {
+                        "type": "string",
+                        "operation": "equals",
+                        "name": "filter.operator.equals"
+                      }
+                    }
+                  ],
+                  "combinator": "and"
+                },
+                "renameOutput": true,
+                "outputKey": "no_action"
+              },
+              {
+                "conditions": {
+                  "options": {
+                    "caseSensitive": true,
+                    "leftValue": "",
+                    "typeValidation": "strict",
+                    "version": 3
+                  },
+                  "conditions": [
+                    {
+                      "id": "cac630fd-fc4d-474c-8add-f7f510a1e011",
+                      "leftValue": "={{ $json.next_action }}",
+                      "rightValue": "operator_intervention_required",
+                      "operator": {
+                        "type": "string",
+                        "operation": "equals",
+                        "name": "filter.operator.equals"
+                      }
+                    }
+                  ],
+                  "combinator": "and"
+                },
+                "renameOutput": true,
+                "outputKey": "operator_intervention_required"
+              }
+            ]
+          },
+          "options": {
+            "fallbackOutput": "extra"
+          }
+        },
+        "type": "n8n-nodes-base.switch",
+        "typeVersion": 3.4,
+        "position": [
+          -768,
+          -32
+        ],
+        "id": "a25ff224-71c0-41a7-abd5-61e1e948d76a",
+        "name": "Route Finalization Preparation"
+      },
+      {
+        "parameters": {
+          "rules": {
+            "values": [
+              {
+                "conditions": {
+                  "options": {
+                    "caseSensitive": true,
+                    "leftValue": "",
+                    "typeValidation": "strict",
+                    "version": 3
+                  },
+                  "conditions": [
+                    {
+                      "leftValue": "={{ $json.operation_type }}",
+                      "rightValue": "create_drive_folder",
+                      "operator": {
+                        "type": "string",
+                        "operation": "equals"
+                      },
+                      "id": "17bb8182-f692-4f27-ad75-0d8a2cb5ae97"
+                    }
+                  ],
+                  "combinator": "and"
+                },
+                "renameOutput": true,
+                "outputKey": "create_drive_folder"
+              },
+              {
+                "conditions": {
+                  "options": {
+                    "caseSensitive": true,
+                    "leftValue": "",
+                    "typeValidation": "strict",
+                    "version": 3
+                  },
+                  "conditions": [
+                    {
+                      "id": "b0a46981-c5d7-46d1-87ba-3b96088e8e59",
+                      "leftValue": "={{ $json.operation_type }}",
+                      "rightValue": "create_kickoff_event",
+                      "operator": {
+                        "type": "string",
+                        "operation": "equals",
+                        "name": "filter.operator.equals"
+                      }
+                    }
+                  ],
+                  "combinator": "and"
+                },
+                "renameOutput": true,
+                "outputKey": "create_kickoff_event"
+              },
+              {
+                "conditions": {
+                  "options": {
+                    "caseSensitive": true,
+                    "leftValue": "",
+                    "typeValidation": "strict",
+                    "version": 3
+                  },
+                  "conditions": [
+                    {
+                      "id": "1f618fe8-c0f2-4e96-aecf-f42c54459c02",
+                      "leftValue": "={{ $json.operation_type }}",
+                      "rightValue": "notify_team",
+                      "operator": {
+                        "type": "string",
+                        "operation": "equals",
+                        "name": "filter.operator.equals"
+                      }
+                    }
+                  ],
+                  "combinator": "and"
+                },
+                "renameOutput": true,
+                "outputKey": "notify_team"
+              }
+            ]
+          },
+          "options": {
+            "fallbackOutput": "extra"
+          }
+        },
+        "type": "n8n-nodes-base.switch",
+        "typeVersion": 3.4,
+        "position": [
+          -528,
+          -544
+        ],
+        "id": "2383d316-1325-4232-af17-b721a2324eeb",
+        "name": "Route Finalization Operation"
+      },
+      {
+        "parameters": {
+          "mode": "runOnceForEachItem",
+          "jsCode": "// Return a controlled WF06 result when no external action is required.\n\nconst input = $json ?? {};\n\nif (input.next_action !== 'no_action') {\n  throw new Error(\n    'Return Finalization No Action Result received an invalid next action',\n  );\n}\n\nconst allowedOutcomes = new Set([\n  'already_completed',\n  'not_required',\n  'busy',\n  'not_due',\n]);\n\nif (!allowedOutcomes.has(input.preparation_outcome)) {\n  throw new Error(\n    `Unsupported WF06 no-action outcome: ${input.preparation_outcome}`,\n  );\n}\n\nreturn {\n  json: {\n    workflow:\n      'WF06',\n\n    result:\n      input.preparation_outcome,\n\n    case_id:\n      input.case_id ?? null,\n\n    correlation_id:\n      input.correlation_id ?? null,\n\n    case_state:\n      input.case_state ?? null,\n\n    external_client_id:\n      input.external_client_id ?? null,\n\n    drive_folder_id:\n      input.drive_folder_id ?? null,\n\n    kickoff_event_id:\n      input.kickoff_event_id ?? null,\n\n    team_message_id:\n      input.team_message_id ?? null,\n\n    operation_id:\n      input.operation_id ?? null,\n\n    operation_type:\n      input.operation_type ?? null,\n\n    operation_status:\n      input.operation_status ?? null,\n\n    operation_claim_outcome:\n      input.operation_claim_outcome ?? null,\n  },\n};"
+        },
+        "type": "n8n-nodes-base.code",
+        "typeVersion": 2,
+        "position": [
+          -416,
+          -48
+        ],
+        "id": "30cc67fd-8adf-4ad4-ae68-1d3a8bdc6703",
+        "name": "Return Finalization No Action Result"
+      },
+      {
+        "parameters": {
+          "operation": "executeQuery",
+          "query": "SELECT\n    $3::jsonb AS input_context,\n    complete_wf06_onboarding(\n        $1::uuid,\n        $2::uuid\n    ) AS completion_result;",
+          "options": {
+            "queryReplacement": "={{ [   $json.case_id,   $json.correlation_id,   JSON.stringify($json) ] }}"
+          }
+        },
+        "type": "n8n-nodes-base.postgres",
+        "typeVersion": 2.6,
+        "position": [
+          -400,
+          -208
+        ],
+        "id": "3e51f62c-ea8d-4ec1-bda0-ea772080b3e9",
+        "name": "Complete Onboarding",
+        "credentials": {
+          "postgres": {
+            "id": "zU4wPvkQFRBSwH0b",
+            "name": "B2B Onboarding App DB"
+          }
+        }
+      },
+      {
+        "parameters": {
+          "mode": "runOnceForEachItem",
+          "jsCode": "// Normalize and validate the authoritative PostgreSQL\n// onboarding completion result.\n\nconst row = $json ?? {};\n\nfunction isPlainObject(value) {\n  return (\n    value !== null &&\n    typeof value === 'object' &&\n    !Array.isArray(value)\n  );\n}\n\nfunction requireText(value, fieldName) {\n  const normalized = String(value ?? '').trim();\n\n  if (normalized === '') {\n    throw new Error(\n      `${fieldName} must not be blank`,\n    );\n  }\n\n  return normalized;\n}\n\nfunction optionalText(value) {\n  if (\n    value === null ||\n    value === undefined\n  ) {\n    return null;\n  }\n\n  const normalized = String(value).trim();\n\n  return normalized === ''\n    ? null\n    : normalized;\n}\n\nif (!isPlainObject(row.input_context)) {\n  throw new Error(\n    'WF06 completion input_context must be a JSON object',\n  );\n}\n\nif (!isPlainObject(row.completion_result)) {\n  throw new Error(\n    'WF06 completion_result must be a JSON object',\n  );\n}\n\nconst inputContext =\n  row.input_context;\n\nconst result =\n  row.completion_result;\n\nconst completionOutcome = requireText(\n  result.completion_outcome,\n  'completion_outcome',\n);\n\nconst successfulOutcomes = new Set([\n  'completed',\n  'already_completed',\n]);\n\nlet nextAction;\n\nif (successfulOutcomes.has(completionOutcome)) {\n  const requiredSuccessFields = [\n    'case_id',\n    'correlation_id',\n    'external_client_id',\n    'drive_folder_id',\n    'kickoff_event_id',\n    'team_message_id',\n  ];\n\n  for (const fieldName of requiredSuccessFields) {\n    requireText(\n      result[fieldName],\n      fieldName,\n    );\n  }\n\n  if (result.case_state !== 'completed') {\n    throw new Error(\n      'WF06 successful completion must have case_state=completed',\n    );\n  }\n\n  nextAction =\n    'return_completed';\n\n} else {\n  nextAction =\n    'operator_intervention_required';\n}\n\nreturn {\n  json: {\n    ...inputContext,\n    ...result,\n\n    workflow:\n      'WF06',\n\n    completion_outcome:\n      completionOutcome,\n\n    next_action:\n      nextAction,\n\n    error_code:\n      optionalText(result.error_code),\n  },\n};"
+        },
+        "type": "n8n-nodes-base.code",
+        "typeVersion": 2,
+        "position": [
+          -176,
+          -176
+        ],
+        "id": "b1597f64-c759-4551-bdc5-2fe10f480835",
+        "name": "Normalize Onboarding Completion"
+      },
+      {
+        "parameters": {
+          "rules": {
+            "values": [
+              {
+                "conditions": {
+                  "options": {
+                    "caseSensitive": true,
+                    "leftValue": "",
+                    "typeValidation": "strict",
+                    "version": 3
+                  },
+                  "conditions": [
+                    {
+                      "leftValue": "={{ $json.next_action }}",
+                      "rightValue": "return_completed",
+                      "operator": {
+                        "type": "string",
+                        "operation": "equals"
+                      },
+                      "id": "2c98e378-30ea-43dd-a37a-aada7b1ad550"
+                    }
+                  ],
+                  "combinator": "and"
+                },
+                "renameOutput": true,
+                "outputKey": "return_completed"
+              },
+              {
+                "conditions": {
+                  "options": {
+                    "caseSensitive": true,
+                    "leftValue": "",
+                    "typeValidation": "strict",
+                    "version": 3
+                  },
+                  "conditions": [
+                    {
+                      "id": "60e62d78-59db-4ae1-945f-78b7fb3b43f5",
+                      "leftValue": "={{ $json.next_action }}",
+                      "rightValue": "operator_intervention_required",
+                      "operator": {
+                        "type": "string",
+                        "operation": "equals",
+                        "name": "filter.operator.equals"
+                      }
+                    }
+                  ],
+                  "combinator": "and"
+                },
+                "renameOutput": true,
+                "outputKey": "operator_intervention_required"
+              }
+            ]
+          },
+          "options": {
+            "fallbackOutput": "extra"
+          }
+        },
+        "type": "n8n-nodes-base.switch",
+        "typeVersion": 3.4,
+        "position": [
+          48,
+          -128
+        ],
+        "id": "7cf63dda-fe5f-4765-ad61-65da5cee26af",
+        "name": "Route Onboarding Completion"
+      },
+      {
+        "parameters": {
+          "mode": "runOnceForEachItem",
+          "jsCode": "// Return the sanitized terminal WF06 completion result.\n\nconst input = $json ?? {};\n\nif (input.next_action !== 'return_completed') {\n  throw new Error(\n    'Return Finalization Completed Result received an invalid next action',\n  );\n}\n\nif (\n  input.completion_outcome !== 'completed' &&\n  input.completion_outcome !== 'already_completed'\n) {\n  throw new Error(\n    'WF06 completion outcome is not successful',\n  );\n}\n\nif (input.case_state !== 'completed') {\n  throw new Error(\n    'WF06 final result must have case_state=completed',\n  );\n}\n\nreturn {\n  json: {\n    workflow:\n      'WF06',\n\n    result:\n      input.completion_outcome,\n\n    case_id:\n      input.case_id,\n\n    correlation_id:\n      input.correlation_id,\n\n    case_state:\n      input.case_state,\n\n    external_client_id:\n      input.external_client_id,\n\n    drive_folder_id:\n      input.drive_folder_id,\n\n    kickoff_event_id:\n      input.kickoff_event_id,\n\n    team_message_id:\n      input.team_message_id,\n\n    completed_at:\n      input.completed_at ?? null,\n  },\n};"
+        },
+        "type": "n8n-nodes-base.code",
+        "typeVersion": 2,
+        "position": [
+          416,
+          -144
+        ],
+        "id": "f7f02432-338f-45c4-b0c4-52c0e2dec0e7",
+        "name": "Return Finalization Completed Result"
+      },
+      {
+        "parameters": {
+          "mode": "runOnceForEachItem",
+          "jsCode": "// Build the deterministic Google Drive reconciliation query\n// and the exact folder creation request.\n\nconst input = $json ?? {};\n\nfunction isPlainObject(value) {\n  return (\n    value !== null &&\n    typeof value === 'object' &&\n    !Array.isArray(value)\n  );\n}\n\nfunction requireText(value, fieldName) {\n  const normalized = String(value ?? '').trim();\n\n  if (normalized === '') {\n    throw new Error(\n      `${fieldName} must not be blank`,\n    );\n  }\n\n  return normalized;\n}\n\nfunction escapeDriveQueryValue(value) {\n  return value\n    .replace(/\\\\/g, '\\\\\\\\')\n    .replace(/'/g, \"\\\\'\");\n}\n\nif (\n  input.next_action !== 'process_operation' ||\n  input.operation_type !== 'create_drive_folder'\n) {\n  throw new Error(\n    'Build Drive Reconciliation Request received an invalid operation',\n  );\n}\n\nif (!isPlainObject(input.request_summary)) {\n  throw new Error(\n    'Drive request_summary must be a JSON object',\n  );\n}\n\nconst request =\n  input.request_summary;\n\nconst parentFolderId = requireText(\n  request.parent_folder_id,\n  'parent_folder_id',\n);\n\nconst folderName = requireText(\n  request.folder_name,\n  'folder_name',\n);\n\nconst mimeType = requireText(\n  request.mime_type,\n  'mime_type',\n);\n\nconst onboardingCaseId = requireText(\n  request.onboarding_case_id,\n  'onboarding_case_id',\n);\n\nconst operationKeyHash = requireText(\n  request.operation_key_hash,\n  'operation_key_hash',\n).toLowerCase();\n\nif (\n  mimeType !==\n  'application/vnd.google-apps.folder'\n) {\n  throw new Error(\n    'Drive request contains an invalid folder MIME type',\n  );\n}\n\nif (onboardingCaseId !== input.case_id) {\n  throw new Error(\n    'Drive onboarding_case_id does not match case_id',\n  );\n}\n\nif (\n  !/^[0-9a-f]{32}$/.test(operationKeyHash)\n) {\n  throw new Error(\n    'Drive operation_key_hash must contain 32 lowercase hexadecimal characters',\n  );\n}\n\nif (\n  typeof request.use_shared_drive !==\n  'boolean'\n) {\n  throw new Error(\n    'Drive use_shared_drive must be a boolean',\n  );\n}\n\nconst escapedParentFolderId =\n  escapeDriveQueryValue(parentFolderId);\n\nconst escapedCaseId =\n  escapeDriveQueryValue(onboardingCaseId);\n\nconst escapedOperationKeyHash =\n  escapeDriveQueryValue(operationKeyHash);\n\nconst searchQuery = [\n  `'${escapedParentFolderId}' in parents`,\n  `mimeType = '${mimeType}'`,\n  'trashed = false',\n  `appProperties has { key='onboardingCaseId' and value='${escapedCaseId}' }`,\n  `appProperties has { key='operationKeyHash' and value='${escapedOperationKeyHash}' }`,\n].join(' and ');\n\nreturn {\n  json: {\n    ...input,\n\n    provider:\n      'google_drive',\n\n    drive_search_query:\n      searchQuery,\n\n    drive_expected: {\n      parent_folder_id:\n        parentFolderId,\n\n      folder_name:\n        folderName,\n\n      mime_type:\n        mimeType,\n\n      onboarding_case_id:\n        onboardingCaseId,\n\n      operation_key_hash:\n        operationKeyHash,\n\n      use_shared_drive:\n        request.use_shared_drive,\n    },\n\n    drive_create_request_body: {\n      name:\n        folderName,\n\n      mimeType:\n        mimeType,\n\n      parents: [\n        parentFolderId,\n      ],\n\n      appProperties: {\n        onboardingCaseId:\n          onboardingCaseId,\n\n        operationKeyHash:\n          operationKeyHash,\n      },\n    },\n\n    provider_request_started_at:\n      new Date().toISOString(),\n  },\n};"
+        },
+        "type": "n8n-nodes-base.code",
+        "typeVersion": 2,
+        "position": [
+          -80,
+          -752
+        ],
+        "id": "2db523a5-fdd8-406c-bdb2-948c01f9c1a7",
+        "name": "Build Drive Reconciliation Request"
+      },
+      {
+        "parameters": {
+          "url": "https://www.googleapis.com/drive/v3/files",
+          "authentication": "predefinedCredentialType",
+          "nodeCredentialType": "googleDriveOAuth2Api",
+          "sendQuery": true,
+          "queryParameters": {
+            "parameters": [
+              {
+                "name": "q",
+                "value": "={{ $json.drive_search_query }}"
+              },
+              {
+                "name": "spaces",
+                "value": "drive"
+              },
+              {
+                "name": "pageSize",
+                "value": "10"
+              },
+              {
+                "name": "fields",
+                "value": "files(id,name,mimeType,parents,trashed,appProperties,webViewLink),nextPageToken,incompleteSearch"
+              },
+              {
+                "name": "supportsAllDrives",
+                "value": "true"
+              },
+              {
+                "name": "includeItemsFromAllDrives",
+                "value": "true"
+              }
+            ]
+          },
+          "options": {
+            "response": {
+              "response": {
+                "fullResponse": true,
+                "neverError": true,
+                "responseFormat": "json"
+              }
+            },
+            "timeout": 30000
+          }
+        },
+        "type": "n8n-nodes-base.httpRequest",
+        "typeVersion": 4.4,
+        "position": [
+          112,
+          -576
+        ],
+        "id": "e52850d8-fcde-4b2e-bac1-54a129f1821f",
+        "name": "Search Drive Folder",
+        "credentials": {
+          "googleDriveOAuth2Api": {
+            "id": "kaWPKuo2vMDthQJb",
+            "name": "Google Drive OAuth2 - B2B Onboarding"
+          }
+        },
+        "onError": "continueErrorOutput"
+      },
+      {
+        "parameters": {
+          "mode": "combine",
+          "combineBy": "combineByPosition",
+          "options": {}
+        },
+        "type": "n8n-nodes-base.merge",
+        "typeVersion": 3.2,
+        "position": [
+          464,
+          -736
+        ],
+        "id": "d10c931a-3a3c-4f52-9cf4-09125044389f",
+        "name": "Merge Drive Search Success Context"
+      },
+      {
+        "parameters": {
+          "mode": "combine",
+          "combineBy": "combineByPosition",
+          "options": {}
+        },
+        "type": "n8n-nodes-base.merge",
+        "typeVersion": 3.2,
+        "position": [
+          464,
+          -528
+        ],
+        "id": "ca11a4ed-d2a8-4a14-bd7b-aab9f8186d21",
+        "name": "Merge Drive Search Error Context"
+      },
+      {
+        "parameters": {
+          "mode": "runOnceForEachItem",
+          "jsCode": "const input = $json;\nconst receivedAt = new Date().toISOString();\n\nconst isObject = (value) =>\n  value !== null &&\n  typeof value === 'object' &&\n  !Array.isArray(value);\n\nconst requireString = (value, fieldName) => {\n  if (typeof value !== 'string' || value.trim() === '') {\n    throw new Error(`${fieldName} must be a non-empty string`);\n  }\n\n  return value.trim();\n};\n\nconst parseHttpStatus = (value) => {\n  const parsed = Number(value);\n\n  return Number.isInteger(parsed) &&\n    parsed >= 100 &&\n    parsed <= 599\n    ? parsed\n    : null;\n};\n\nconst parseRetryAfterSeconds = (headers) => {\n  if (!isObject(headers)) {\n    return null;\n  }\n\n  const raw =\n    headers['retry-after'] ??\n    headers['Retry-After'] ??\n    null;\n\n  if (raw === null || raw === undefined) {\n    return null;\n  }\n\n  const seconds = Number(raw);\n\n  if (Number.isFinite(seconds) && seconds >= 0) {\n    return Math.ceil(seconds);\n  }\n\n  const retryAt = Date.parse(String(raw));\n\n  return Number.isFinite(retryAt)\n    ? Math.max(0, Math.ceil((retryAt - Date.now()) / 1000))\n    : null;\n};\n\nrequireString(input.case_id, 'case_id');\nrequireString(input.operation_id, 'operation_id');\nrequireString(input.lease_owner, 'lease_owner');\n\nif (!isObject(input.drive_expected)) {\n  throw new Error('drive_expected must be an object');\n}\n\nconst expected = {\n  parent_folder_id: requireString(\n    input.drive_expected.parent_folder_id,\n    'drive_expected.parent_folder_id'\n  ),\n  folder_name: requireString(\n    input.drive_expected.folder_name,\n    'drive_expected.folder_name'\n  ),\n  mime_type: requireString(\n    input.drive_expected.mime_type,\n    'drive_expected.mime_type'\n  ),\n  onboarding_case_id: requireString(\n    input.drive_expected.onboarding_case_id,\n    'drive_expected.onboarding_case_id'\n  ),\n  operation_key_hash: requireString(\n    input.drive_expected.operation_key_hash,\n    'drive_expected.operation_key_hash'\n  ),\n  use_shared_drive:\n    input.drive_expected.use_shared_drive === true,\n};\n\nif (expected.mime_type !== 'application/vnd.google-apps.folder') {\n  throw new Error(\n    'drive_expected.mime_type must identify a Google Drive folder'\n  );\n}\n\nconst httpStatus = parseHttpStatus(\n  input.statusCode ??\n  input.status_code ??\n  input.http_status\n);\n\nconst headers = isObject(input.headers)\n  ? input.headers\n  : {};\n\nconst body = isObject(input.body)\n  ? input.body\n  : null;\n\nconst retryAfterSeconds = parseRetryAfterSeconds(headers);\n\nconst buildResult = (overrides) => ({\n  json: {\n    ...input,\n    workflow: 'WF06',\n    provider: 'google_drive',\n    http_status: httpStatus,\n    provider_response_received_at: receivedAt,\n    ...overrides,\n  },\n});\n\nconst buildFailure = ({\n  providerOutcome,\n  nextAction,\n  errorClass,\n  errorCode,\n  errorMessage,\n  retryable,\n  responseSummary = null,\n}) =>\n  buildResult({\n    provider_outcome: providerOutcome,\n    next_action: nextAction,\n    external_id: null,\n    reconciled: false,\n    provider_response_summary: responseSummary,\n    error_class: errorClass,\n    error_code: errorCode,\n    error_message: errorMessage,\n    retryable,\n    provider_retry_after_seconds: retryAfterSeconds,\n  });\n\nconst transportError = isObject(input.error)\n  ? input.error\n  : typeof input.error === 'string' && input.error.trim() !== ''\n    ? { message: input.error.trim() }\n    : null;\n\nif (transportError !== null && httpStatus === null) {\n  return buildFailure({\n    providerOutcome: 'transport_error',\n    nextAction: 'finalize_retryable_failure',\n    errorClass: 'transport',\n    errorCode: 'drive_search_transport_error',\n    errorMessage:\n      typeof transportError.message === 'string' &&\n      transportError.message.trim() !== ''\n        ? transportError.message.trim()\n        : 'Google Drive search failed before an HTTP response was received',\n    retryable: true,\n  });\n}\n\nif (httpStatus === null) {\n  return buildFailure({\n    providerOutcome: 'invalid_response',\n    nextAction: 'finalize_retryable_failure',\n    errorClass: 'protocol',\n    errorCode: 'drive_search_missing_http_status',\n    errorMessage:\n      'Google Drive search did not return a valid HTTP status',\n    retryable: true,\n  });\n}\n\nif (httpStatus !== 200) {\n  const retryable =\n    httpStatus === 408 ||\n    httpStatus === 425 ||\n    httpStatus === 429 ||\n    httpStatus >= 500;\n\n  const providerError = isObject(body?.error)\n    ? body.error\n    : {};\n\n  const providerCode =\n    providerError.status ??\n    providerError.code ??\n    `http_${httpStatus}`;\n\n  const providerMessage =\n    typeof providerError.message === 'string' &&\n    providerError.message.trim() !== ''\n      ? providerError.message.trim()\n      : `Google Drive search returned HTTP ${httpStatus}`;\n\n  return buildFailure({\n    providerOutcome: 'http_error',\n    nextAction: retryable\n      ? 'finalize_retryable_failure'\n      : 'finalize_terminal_failure',\n    errorClass: 'provider_http',\n    errorCode: `drive_search_${String(providerCode).toLowerCase()}`,\n    errorMessage: providerMessage,\n    retryable,\n    responseSummary: {\n      marker_verified: false,\n      created: false,\n    },\n  });\n}\n\nif (body === null || !Array.isArray(body.files)) {\n  return buildFailure({\n    providerOutcome: 'invalid_response',\n    nextAction: 'finalize_retryable_failure',\n    errorClass: 'protocol',\n    errorCode: 'drive_search_invalid_response_schema',\n    errorMessage:\n      'Google Drive search response must contain a files array',\n    retryable: true,\n  });\n}\n\nif (body.incompleteSearch === true) {\n  return buildFailure({\n    providerOutcome: 'incomplete_search',\n    nextAction: 'finalize_retryable_failure',\n    errorClass: 'provider_response',\n    errorCode: 'drive_search_incomplete',\n    errorMessage:\n      'Google Drive reported an incomplete folder search',\n    retryable: true,\n    responseSummary: {\n      marker_verified: false,\n      created: false,\n      returned_file_count: body.files.length,\n      incomplete_search: true,\n    },\n  });\n}\n\nconst files = body.files.filter(isObject);\n\nif (files.length !== body.files.length) {\n  return buildFailure({\n    providerOutcome: 'invalid_response',\n    nextAction: 'finalize_retryable_failure',\n    errorClass: 'protocol',\n    errorCode: 'drive_search_invalid_file_record',\n    errorMessage:\n      'Google Drive search response contains an invalid file record',\n    retryable: true,\n    responseSummary: {\n      marker_verified: false,\n      created: false,\n      returned_file_count: body.files.length,\n      valid_file_record_count: files.length,\n    },\n  });\n}\n\nconst exactMatches = files.filter((file) => {\n  if (!isObject(file.appProperties)) {\n    return false;\n  }\n\n  return (\n    file.appProperties.onboardingCaseId ===\n      expected.onboarding_case_id &&\n    file.appProperties.operationKeyHash ===\n      expected.operation_key_hash\n  );\n});\n\nconst hasNextPageToken =\n  typeof body.nextPageToken === 'string' &&\n  body.nextPageToken.trim() !== '';\n\nif (hasNextPageToken || exactMatches.length > 1) {\n  return buildFailure({\n    providerOutcome: 'marker_ambiguity',\n    nextAction: 'finalize_terminal_failure',\n    errorClass: 'provider_consistency',\n    errorCode: 'drive_folder_marker_ambiguity',\n    errorMessage:\n      'Google Drive returned more than one possible folder for the immutable operation marker',\n    retryable: false,\n    responseSummary: {\n      marker_verified: false,\n      created: false,\n      returned_file_count: files.length,\n      exact_marker_match_count: exactMatches.length,\n      search_truncated: hasNextPageToken,\n    },\n  });\n}\n\nif (files.length > 0 && exactMatches.length === 0) {\n  return buildFailure({\n    providerOutcome: 'marker_mismatch',\n    nextAction: 'finalize_terminal_failure',\n    errorClass: 'provider_consistency',\n    errorCode: 'drive_folder_marker_mismatch',\n    errorMessage:\n      'Google Drive returned folder data that does not match the immutable operation marker',\n    retryable: false,\n    responseSummary: {\n      marker_verified: false,\n      created: false,\n      returned_file_count: files.length,\n      exact_marker_match_count: 0,\n    },\n  });\n}\n\nif (files.length !== exactMatches.length) {\n  return buildFailure({\n    providerOutcome: 'unexpected_search_results',\n    nextAction: 'finalize_terminal_failure',\n    errorClass: 'provider_consistency',\n    errorCode: 'drive_search_unexpected_results',\n    errorMessage:\n      'Google Drive returned a mixture of matching and non-matching folder records',\n    retryable: false,\n    responseSummary: {\n      marker_verified: false,\n      created: false,\n      returned_file_count: files.length,\n      exact_marker_match_count: exactMatches.length,\n    },\n  });\n}\n\nif (exactMatches.length === 0) {\n  return buildResult({\n    provider_outcome: 'not_found',\n    next_action: 'create_drive_folder',\n    http_status: 200,\n    external_id: null,\n    reconciled: false,\n    provider_response_summary: {\n      marker_verified: false,\n      created: false,\n      returned_file_count: 0,\n    },\n    error_class: null,\n    error_code: null,\n    error_message: null,\n    retryable: false,\n    provider_retry_after_seconds: null,\n  });\n}\n\nconst folder = exactMatches[0];\n\nconst folderId =\n  typeof folder.id === 'string'\n    ? folder.id.trim()\n    : '';\n\nconst folderParents = Array.isArray(folder.parents)\n  ? folder.parents\n  : [];\n\nconst validMetadata =\n  folderId !== '' &&\n  folder.name === expected.folder_name &&\n  folder.mimeType === expected.mime_type &&\n  folder.trashed === false &&\n  folderParents.includes(expected.parent_folder_id);\n\nif (!validMetadata) {\n  return buildFailure({\n    providerOutcome: 'marker_mismatch',\n    nextAction: 'finalize_terminal_failure',\n    errorClass: 'provider_consistency',\n    errorCode: 'drive_folder_metadata_mismatch',\n    errorMessage:\n      'Google Drive folder marker matched but folder metadata did not match the immutable request',\n    retryable: false,\n    responseSummary: {\n      marker_verified: true,\n      created: false,\n      folder_id_present: folderId !== '',\n      folder_name_matches:\n        folder.name === expected.folder_name,\n      mime_type_matches:\n        folder.mimeType === expected.mime_type,\n      parent_matches:\n        folderParents.includes(expected.parent_folder_id),\n      trashed: folder.trashed === true,\n    },\n  });\n}\n\nreturn buildResult({\n  provider_outcome: 'reconciled',\n  next_action: 'finalize_success',\n  http_status: 200,\n  external_id: folderId,\n  reconciled: true,\n  provider_response_summary: {\n    marker_verified: true,\n    created: false,\n    web_view_link:\n      typeof folder.webViewLink === 'string'\n        ? folder.webViewLink\n        : null,\n  },\n  error_class: null,\n  error_code: null,\n  error_message: null,\n  retryable: false,\n  provider_retry_after_seconds: null,\n});"
+        },
+        "type": "n8n-nodes-base.code",
+        "typeVersion": 2,
+        "position": [
+          736,
+          -624
+        ],
+        "id": "716daf97-129d-4f2f-8a15-cf07f29799fe",
+        "name": "Normalize Drive Search Result"
+      },
+      {
+        "parameters": {
+          "rules": {
+            "values": [
+              {
+                "conditions": {
+                  "options": {
+                    "caseSensitive": true,
+                    "leftValue": "",
+                    "typeValidation": "strict",
+                    "version": 3
+                  },
+                  "conditions": [
+                    {
+                      "leftValue": "={{ $json.next_action }}",
+                      "rightValue": "create_drive_folder",
+                      "operator": {
+                        "type": "string",
+                        "operation": "equals"
+                      },
+                      "id": "106d635a-558a-4705-ae74-15e3b3e7b699"
+                    }
+                  ],
+                  "combinator": "and"
+                },
+                "renameOutput": true,
+                "outputKey": "create_drive_folder"
+              },
+              {
+                "conditions": {
+                  "options": {
+                    "caseSensitive": true,
+                    "leftValue": "",
+                    "typeValidation": "strict",
+                    "version": 3
+                  },
+                  "conditions": [
+                    {
+                      "id": "82f4e54e-5349-4a3f-923d-8a8c208d597c",
+                      "leftValue": "={{ $json.next_action }}",
+                      "rightValue": "finalize_success",
+                      "operator": {
+                        "type": "string",
+                        "operation": "equals",
+                        "name": "filter.operator.equals"
+                      }
+                    }
+                  ],
+                  "combinator": "and"
+                },
+                "renameOutput": true,
+                "outputKey": "finalize_success"
+              },
+              {
+                "conditions": {
+                  "options": {
+                    "caseSensitive": true,
+                    "leftValue": "",
+                    "typeValidation": "strict",
+                    "version": 3
+                  },
+                  "conditions": [
+                    {
+                      "id": "c50d8c82-aca4-49ae-bf9d-c481622242c7",
+                      "leftValue": "={{ $json.next_action }}",
+                      "rightValue": "finalize_retryable_failure",
+                      "operator": {
+                        "type": "string",
+                        "operation": "equals",
+                        "name": "filter.operator.equals"
+                      }
+                    }
+                  ],
+                  "combinator": "and"
+                },
+                "renameOutput": true,
+                "outputKey": "finalize_retryable_failure"
+              },
+              {
+                "conditions": {
+                  "options": {
+                    "caseSensitive": true,
+                    "leftValue": "",
+                    "typeValidation": "strict",
+                    "version": 3
+                  },
+                  "conditions": [
+                    {
+                      "id": "f8b69946-878e-450a-9604-22b08bea69c4",
+                      "leftValue": "={{ $json.next_action }}",
+                      "rightValue": "finalize_terminal_failure",
+                      "operator": {
+                        "type": "string",
+                        "operation": "equals",
+                        "name": "filter.operator.equals"
+                      }
+                    }
+                  ],
+                  "combinator": "and"
+                },
+                "renameOutput": true,
+                "outputKey": "finalize_terminal_failure"
+              }
+            ]
+          },
+          "options": {
+            "fallbackOutput": "extra"
+          }
+        },
+        "type": "n8n-nodes-base.switch",
+        "typeVersion": 3.4,
+        "position": [
+          944,
+          -624
+        ],
+        "id": "25773c34-be53-4516-9756-71e978743e00",
+        "name": "Route Drive Search Result"
+      },
+      {
+        "parameters": {
+          "method": "POST",
+          "url": "https://www.googleapis.com/drive/v3/files",
+          "authentication": "predefinedCredentialType",
+          "nodeCredentialType": "googleDriveOAuth2Api",
+          "sendQuery": true,
+          "queryParameters": {
+            "parameters": [
+              {
+                "name": "supportsAllDrives",
+                "value": "true"
+              },
+              {
+                "name": "fields",
+                "value": "id,name,mimeType,parents,trashed,appProperties,webViewLink"
+              }
+            ]
+          },
+          "sendBody": true,
+          "specifyBody": "json",
+          "jsonBody": "={{ $json.drive_create_request_body }}",
+          "options": {
+            "response": {
+              "response": {
+                "fullResponse": true,
+                "neverError": true
+              }
+            },
+            "timeout": 30000
+          }
+        },
+        "type": "n8n-nodes-base.httpRequest",
+        "typeVersion": 4.4,
+        "position": [
+          1296,
+          -688
+        ],
+        "id": "3bdd46c1-9d4a-45a8-8056-021ab0971ecd",
+        "name": "Create Drive Folder",
+        "credentials": {
+          "googleDriveOAuth2Api": {
+            "id": "kaWPKuo2vMDthQJb",
+            "name": "Google Drive OAuth2 - B2B Onboarding"
+          }
+        },
+        "onError": "continueErrorOutput"
+      },
+      {
+        "parameters": {
+          "mode": "combine",
+          "combineBy": "combineByPosition",
+          "options": {}
+        },
+        "type": "n8n-nodes-base.merge",
+        "typeVersion": 3.2,
+        "position": [
+          1600,
+          -864
+        ],
+        "id": "60b2ff7b-cf5d-4108-a1b8-a6f28a1e1fb7",
+        "name": "Merge Drive Creation Success Context"
+      },
+      {
+        "parameters": {
+          "mode": "combine",
+          "combineBy": "combineByPosition",
+          "options": {}
+        },
+        "type": "n8n-nodes-base.merge",
+        "typeVersion": 3.2,
+        "position": [
+          1616,
+          -560
+        ],
+        "id": "20860327-0bdd-4259-8f57-946a5b916555",
+        "name": "Merge Drive Creation Error Context"
+      },
+      {
+        "parameters": {
+          "mode": "runOnceForEachItem",
+          "jsCode": "const input = $json;\nconst receivedAt = new Date().toISOString();\n\nconst isObject = (value) =>\n  value !== null &&\n  typeof value === 'object' &&\n  !Array.isArray(value);\n\nconst requireString = (value, fieldName) => {\n  if (typeof value !== 'string' || value.trim() === '') {\n    throw new Error(`${fieldName} must be a non-empty string`);\n  }\n\n  return value.trim();\n};\n\nconst parseHttpStatus = (value) => {\n  const parsed = Number(value);\n\n  return Number.isInteger(parsed) &&\n    parsed >= 100 &&\n    parsed <= 599\n    ? parsed\n    : null;\n};\n\nconst parseRetryAfterSeconds = (headers) => {\n  if (!isObject(headers)) {\n    return null;\n  }\n\n  const raw =\n    headers['retry-after'] ??\n    headers['Retry-After'] ??\n    null;\n\n  if (raw === null || raw === undefined) {\n    return null;\n  }\n\n  const seconds = Number(raw);\n\n  if (Number.isFinite(seconds) && seconds >= 0) {\n    return Math.ceil(seconds);\n  }\n\n  const retryAt = Date.parse(String(raw));\n\n  return Number.isFinite(retryAt)\n    ? Math.max(0, Math.ceil((retryAt - Date.now()) / 1000))\n    : null;\n};\n\nrequireString(input.case_id, 'case_id');\nrequireString(input.operation_id, 'operation_id');\nrequireString(input.lease_owner, 'lease_owner');\n\nif (!isObject(input.drive_expected)) {\n  throw new Error('drive_expected must be an object');\n}\n\nconst expected = {\n  parent_folder_id: requireString(\n    input.drive_expected.parent_folder_id,\n    'drive_expected.parent_folder_id'\n  ),\n  folder_name: requireString(\n    input.drive_expected.folder_name,\n    'drive_expected.folder_name'\n  ),\n  mime_type: requireString(\n    input.drive_expected.mime_type,\n    'drive_expected.mime_type'\n  ),\n  onboarding_case_id: requireString(\n    input.drive_expected.onboarding_case_id,\n    'drive_expected.onboarding_case_id'\n  ),\n  operation_key_hash: requireString(\n    input.drive_expected.operation_key_hash,\n    'drive_expected.operation_key_hash'\n  ),\n};\n\nif (expected.mime_type !== 'application/vnd.google-apps.folder') {\n  throw new Error(\n    'drive_expected.mime_type must identify a Google Drive folder'\n  );\n}\n\nconst httpStatus = parseHttpStatus(\n  input.statusCode ??\n  input.status_code ??\n  input.http_status\n);\n\nconst headers = isObject(input.headers)\n  ? input.headers\n  : {};\n\nconst body = isObject(input.body)\n  ? input.body\n  : null;\n\nconst retryAfterSeconds = parseRetryAfterSeconds(headers);\n\nconst buildResult = (overrides) => ({\n  json: {\n    ...input,\n    workflow: 'WF06',\n    provider: 'google_drive',\n    http_status: httpStatus,\n    provider_response_received_at: receivedAt,\n    ...overrides,\n  },\n});\n\nconst buildFailure = ({\n  providerOutcome,\n  nextAction,\n  errorClass,\n  errorCode,\n  errorMessage,\n  retryable,\n  responseSummary = null,\n}) =>\n  buildResult({\n    provider_outcome: providerOutcome,\n    next_action: nextAction,\n    external_id: null,\n    reconciled: false,\n    provider_response_summary: responseSummary,\n    error_class: errorClass,\n    error_code: errorCode,\n    error_message: errorMessage,\n    retryable,\n    provider_retry_after_seconds: retryAfterSeconds,\n  });\n\nconst transportError = isObject(input.error)\n  ? input.error\n  : typeof input.error === 'string' && input.error.trim() !== ''\n    ? { message: input.error.trim() }\n    : null;\n\nif (transportError !== null && httpStatus === null) {\n  return buildFailure({\n    providerOutcome: 'transport_error',\n    nextAction: 'finalize_retryable_failure',\n    errorClass: 'transport',\n    errorCode: 'drive_create_transport_error',\n    errorMessage:\n      typeof transportError.message === 'string' &&\n      transportError.message.trim() !== ''\n        ? transportError.message.trim()\n        : 'Google Drive folder creation failed before an HTTP response was received',\n    retryable: true,\n  });\n}\n\nif (httpStatus === null) {\n  return buildFailure({\n    providerOutcome: 'invalid_response',\n    nextAction: 'finalize_retryable_failure',\n    errorClass: 'protocol',\n    errorCode: 'drive_create_missing_http_status',\n    errorMessage:\n      'Google Drive folder creation did not return a valid HTTP status',\n    retryable: true,\n  });\n}\n\nif (httpStatus !== 200 && httpStatus !== 201) {\n  const retryable =\n    httpStatus === 408 ||\n    httpStatus === 425 ||\n    httpStatus === 429 ||\n    httpStatus >= 500;\n\n  const providerError = isObject(body?.error)\n    ? body.error\n    : {};\n\n  const providerCode =\n    providerError.status ??\n    providerError.code ??\n    `http_${httpStatus}`;\n\n  const providerMessage =\n    typeof providerError.message === 'string' &&\n    providerError.message.trim() !== ''\n      ? providerError.message.trim()\n      : `Google Drive folder creation returned HTTP ${httpStatus}`;\n\n  return buildFailure({\n    providerOutcome: 'http_error',\n    nextAction: retryable\n      ? 'finalize_retryable_failure'\n      : 'finalize_terminal_failure',\n    errorClass: 'provider_http',\n    errorCode: `drive_create_${String(providerCode).toLowerCase()}`,\n    errorMessage: providerMessage,\n    retryable,\n    responseSummary: {\n      marker_verified: false,\n      created: false,\n    },\n  });\n}\n\nif (body === null) {\n  return buildFailure({\n    providerOutcome: 'invalid_response',\n    nextAction: 'finalize_retryable_failure',\n    errorClass: 'protocol',\n    errorCode: 'drive_create_invalid_response_schema',\n    errorMessage:\n      'Google Drive folder creation returned an invalid response body',\n    retryable: true,\n  });\n}\n\nconst folderId =\n  typeof body.id === 'string'\n    ? body.id.trim()\n    : '';\n\nif (folderId === '') {\n  return buildFailure({\n    providerOutcome: 'invalid_response',\n    nextAction: 'finalize_retryable_failure',\n    errorClass: 'protocol',\n    errorCode: 'drive_create_missing_folder_id',\n    errorMessage:\n      'Google Drive folder creation response does not contain a folder ID',\n    retryable: true,\n    responseSummary: {\n      marker_verified: false,\n      created: false,\n    },\n  });\n}\n\nconst parents = Array.isArray(body.parents)\n  ? body.parents\n  : [];\n\nconst appProperties = isObject(body.appProperties)\n  ? body.appProperties\n  : {};\n\nconst metadataChecks = {\n  folder_name_matches:\n    body.name === expected.folder_name,\n  mime_type_matches:\n    body.mimeType === expected.mime_type,\n  parent_matches:\n    parents.includes(expected.parent_folder_id),\n  onboarding_case_marker_matches:\n    appProperties.onboardingCaseId ===\n      expected.onboarding_case_id,\n  operation_key_marker_matches:\n    appProperties.operationKeyHash ===\n      expected.operation_key_hash,\n  not_trashed:\n    body.trashed === false,\n};\n\nconst validMetadata = Object.values(metadataChecks).every(\n  (value) => value === true\n);\n\nif (!validMetadata) {\n  return buildFailure({\n    providerOutcome: 'metadata_mismatch',\n    nextAction: 'finalize_terminal_failure',\n    errorClass: 'provider_consistency',\n    errorCode: 'drive_created_folder_metadata_mismatch',\n    errorMessage:\n      'Google Drive created a folder whose metadata does not match the immutable request',\n    retryable: false,\n    responseSummary: {\n      marker_verified:\n        metadataChecks.onboarding_case_marker_matches &&\n        metadataChecks.operation_key_marker_matches,\n      created: true,\n      folder_id: folderId,\n      ...metadataChecks,\n    },\n  });\n}\n\nreturn buildResult({\n  provider_outcome: 'created',\n  next_action: 'finalize_success',\n  external_id: folderId,\n  reconciled: false,\n  provider_response_summary: {\n    marker_verified: true,\n    created: true,\n    web_view_link:\n      typeof body.webViewLink === 'string'\n        ? body.webViewLink\n        : null,\n  },\n  error_class: null,\n  error_code: null,\n  error_message: null,\n  retryable: false,\n  provider_retry_after_seconds: null,\n});"
+        },
+        "type": "n8n-nodes-base.code",
+        "typeVersion": 2,
+        "position": [
+          1808,
+          -704
+        ],
+        "id": "3be25bda-6efe-4798-88bb-f2c30810ddf7",
+        "name": "Normalize Drive Creation Result"
+      },
+      {
+        "parameters": {
+          "rules": {
+            "values": [
+              {
+                "conditions": {
+                  "options": {
+                    "caseSensitive": true,
+                    "leftValue": "",
+                    "typeValidation": "strict",
+                    "version": 3
+                  },
+                  "conditions": [
+                    {
+                      "leftValue": "={{ $json.next_action }}",
+                      "rightValue": "finalize_success",
+                      "operator": {
+                        "type": "string",
+                        "operation": "equals"
+                      },
+                      "id": "1ac48a49-3b3b-4d26-a377-276bf112036b"
+                    }
+                  ],
+                  "combinator": "and"
+                },
+                "renameOutput": true,
+                "outputKey": "finalize_success"
+              },
+              {
+                "conditions": {
+                  "options": {
+                    "caseSensitive": true,
+                    "leftValue": "",
+                    "typeValidation": "strict",
+                    "version": 3
+                  },
+                  "conditions": [
+                    {
+                      "id": "1ffd27b6-cd17-463e-9c83-efb2c1983474",
+                      "leftValue": "={{ $json.next_action }}",
+                      "rightValue": "finalize_retryable_failure",
+                      "operator": {
+                        "type": "string",
+                        "operation": "equals",
+                        "name": "filter.operator.equals"
+                      }
+                    }
+                  ],
+                  "combinator": "and"
+                },
+                "renameOutput": true,
+                "outputKey": "finalize_retryable_failure"
+              },
+              {
+                "conditions": {
+                  "options": {
+                    "caseSensitive": true,
+                    "leftValue": "",
+                    "typeValidation": "strict",
+                    "version": 3
+                  },
+                  "conditions": [
+                    {
+                      "id": "c9883b08-b9eb-4b25-8286-0d21c4f0cec4",
+                      "leftValue": "={{ $json.next_action }}",
+                      "rightValue": "finalize_terminal_failure",
+                      "operator": {
+                        "type": "string",
+                        "operation": "equals",
+                        "name": "filter.operator.equals"
+                      }
+                    }
+                  ],
+                  "combinator": "and"
+                },
+                "renameOutput": true,
+                "outputKey": "finalize_terminal_failure"
+              }
+            ]
+          },
+          "options": {
+            "fallbackOutput": "extra"
+          }
+        },
+        "type": "n8n-nodes-base.switch",
+        "typeVersion": 3.4,
+        "position": [
+          2016,
+          -704
+        ],
+        "id": "01846d5a-14ca-4680-aef4-42b69b8e44f4",
+        "name": "Route Drive Creation Result"
+      },
+      {
+        "parameters": {
+          "operation": "executeQuery",
+          "query": "SELECT\n    $8::jsonb AS input_context,\n    finalize_wf06_operation_success(\n        $1::uuid,\n        $2::uuid,\n        $3::text,\n        $4::text,\n        $5::text,\n        $6::boolean,\n        $7::jsonb\n    ) AS finalization_result;",
+          "options": {
+            "queryReplacement": "={{ [   $json.case_id,   $json.operation_id,   $json.lease_owner,   $json.external_id,   $json.provider,   $json.reconciled === true,   JSON.stringify($json.provider_response_summary ?? {}),   JSON.stringify($json) ] }}"
+          }
+        },
+        "type": "n8n-nodes-base.postgres",
+        "typeVersion": 2.6,
+        "position": [
+          2224,
+          -896
+        ],
+        "id": "fee17e7d-57b0-450b-9b89-3f26d1b3ee30",
+        "name": "Finalize WF06 Operation Success",
+        "credentials": {
+          "postgres": {
+            "id": "zU4wPvkQFRBSwH0b",
+            "name": "B2B Onboarding App DB"
+          }
+        }
+      },
+      {
+        "parameters": {
+          "operation": "executeQuery",
+          "query": "SELECT\n    $11::jsonb AS input_context,\n    finalize_wf06_operation_failure(\n        $1::uuid,\n        $2::uuid,\n        $3::text,\n        $4::boolean,\n        $5::text,\n        $6::text,\n        $7::text,\n        $8::text,\n        $9::integer,\n        $10::integer\n    ) AS finalization_result;",
+          "options": {
+            "queryReplacement": "={{ [   $json.case_id,   $json.operation_id,   $json.lease_owner,   $json.retryable === true,   $json.provider,   $json.error_class,   $json.error_code,   $json.error_message,   $json.http_status ?? null,   $json.provider_retry_after_seconds ?? null,   JSON.stringify($json) ] }}"
+          }
+        },
+        "type": "n8n-nodes-base.postgres",
+        "typeVersion": 2.6,
+        "position": [
+          2256,
+          -448
+        ],
+        "id": "04e0294b-bad0-4d04-840b-f6b2cf0fdf29",
+        "name": "Finalize WF06 Operation Failure",
+        "credentials": {
+          "postgres": {
+            "id": "zU4wPvkQFRBSwH0b",
+            "name": "B2B Onboarding App DB"
+          }
+        }
+      },
+      {
+        "parameters": {
+          "mode": "runOnceForEachItem",
+          "jsCode": "function parseObject(value, fieldName) {\n  if (\n    value !== null &&\n    typeof value === 'object' &&\n    !Array.isArray(value)\n  ) {\n    return value;\n  }\n\n  if (typeof value === 'string' && value.trim() !== '') {\n    let parsed;\n\n    try {\n      parsed = JSON.parse(value);\n    } catch {\n      throw new Error(\n        `WF06 ${fieldName} is not valid JSON`\n      );\n    }\n\n    if (\n      parsed !== null &&\n      typeof parsed === 'object' &&\n      !Array.isArray(parsed)\n    ) {\n      return parsed;\n    }\n  }\n\n  throw new Error(\n    `WF06 ${fieldName} must be a JSON object`\n  );\n}\n\nfunction firstDefined(...values) {\n  for (const value of values) {\n    if (value !== undefined && value !== null) {\n      return value;\n    }\n  }\n\n  return null;\n}\n\nconst row = $json ?? {};\n\nconst inputContext = parseObject(\n  row.input_context,\n  'input_context'\n);\n\nconst finalizationResult = parseObject(\n  row.finalization_result,\n  'finalization_result'\n);\n\nconst invocation =\n  inputContext.invocation !== null &&\n  typeof inputContext.invocation === 'object' &&\n  !Array.isArray(inputContext.invocation)\n    ? inputContext.invocation\n    : {};\n\nconst finalizationOutcome = String(\n  finalizationResult.finalization_outcome ?? ''\n).trim();\n\nconst operationStatus = String(\n  finalizationResult.operation_status ?? ''\n).trim();\n\nconst stepStatus = String(\n  finalizationResult.step_status ?? ''\n).trim();\n\nconst caseState = String(\n  finalizationResult.case_state ?? ''\n).trim();\n\nconst operationType = String(\n  finalizationResult.operation_type ??\n    inputContext.operation_type ??\n    ''\n).trim();\n\nconst triggerSource = String(\n  firstDefined(\n    invocation.trigger_source,\n    inputContext.trigger_source\n  ) ?? ''\n).trim();\n\nconst acceptedFinalizationOutcomes = new Set([\n  'finalized',\n  'already_finalized',\n]);\n\nlet finalizationRoute = 'operator_intervention';\n\nif (\n  acceptedFinalizationOutcomes.has(finalizationOutcome) &&\n  operationStatus === 'succeeded' &&\n  stepStatus === 'completed' &&\n  caseState === 'finalizing'\n) {\n  finalizationRoute = 'prepare_next_operation';\n} else if (\n  acceptedFinalizationOutcomes.has(finalizationOutcome) &&\n  operationStatus === 'failed_retryable' &&\n  stepStatus === 'failed_retryable' &&\n  caseState === 'finalization_failed'\n) {\n  finalizationRoute = 'return_retryable_failure';\n} else if (\n  acceptedFinalizationOutcomes.has(finalizationOutcome) &&\n  operationStatus === 'failed_terminal' &&\n  stepStatus === 'failed_terminal' &&\n  caseState === 'finalization_failed'\n) {\n  finalizationRoute = 'operator_intervention';\n}\n\nconst output = {\n  ...inputContext,\n\n  case_id: firstDefined(\n    finalizationResult.case_id,\n    inputContext.case_id\n  ),\n\n  correlation_id: firstDefined(\n    finalizationResult.correlation_id,\n    inputContext.correlation_id\n  ),\n\n  client_id: firstDefined(\n    finalizationResult.client_id,\n    inputContext.client_id\n  ),\n\n  accepted_submission_id: firstDefined(\n    finalizationResult.accepted_submission_id,\n    inputContext.accepted_submission_id\n  ),\n\n  external_client_id: firstDefined(\n    finalizationResult.external_client_id,\n    inputContext.external_client_id\n  ),\n\n  operation_id: firstDefined(\n    finalizationResult.operation_id,\n    inputContext.operation_id\n  ),\n\n  operation_type: operationType || null,\n  operation_status: operationStatus || null,\n  step_status: stepStatus || null,\n  case_state: caseState || null,\n\n  next_retry_at:\n    finalizationResult.next_retry_at ?? null,\n\n  requires_intervention:\n    finalizationResult.requires_intervention === true ||\n    finalizationRoute === 'operator_intervention',\n\n  finalization_outcome:\n    finalizationOutcome || null,\n\n  finalization_route:\n    finalizationRoute,\n\n  operation_finalization_result:\n    finalizationResult,\n};\n\n/*\n * Build the exact input expected by\n * prepare_wf06_finalization_operation()\n * when continuing within the same WF06 execution.\n */\nif (finalizationRoute === 'prepare_next_operation') {\n  if (!['wf05', 'wf98'].includes(triggerSource)) {\n    throw new Error(\n      `WF06 cannot prepare the next operation for trigger_source \"${triggerSource}\"`\n    );\n  }\n\n  output.trigger_source = triggerSource;\n\n  /*\n   * The previous external_operation_id must not constrain\n   * the next ordered operation.\n   *\n   * WF98 requires a recovery reason when no explicit\n   * external_operation_id is supplied.\n   */\n  output.external_operation_id = null;\n\n  if (triggerSource === 'wf98') {\n    output.client_id = null;\n    output.accepted_submission_id = null;\n    output.external_client_id = null;\n\n    output.recovery_reason =\n      operationType === 'notify_team'\n        ? 'complete_finalization'\n        : 'resume_finalization';\n  } else {\n    output.client_id = firstDefined(\n      invocation.client_id,\n      inputContext.invocation_client_id,\n      inputContext.client_id,\n      finalizationResult.client_id\n    );\n\n    output.accepted_submission_id = firstDefined(\n      invocation.accepted_submission_id,\n      inputContext.invocation_accepted_submission_id,\n      inputContext.accepted_submission_id,\n      finalizationResult.accepted_submission_id\n    );\n\n    output.external_client_id = firstDefined(\n      invocation.external_client_id,\n      inputContext.invocation_external_client_id,\n      inputContext.external_client_id,\n      finalizationResult.external_client_id\n    );\n\n    output.recovery_reason = null;\n  }\n\n  output.execution_id = firstDefined(\n    inputContext.execution_id,\n    inputContext.n8n_execution_id\n  );\n\n  output.configuration = firstDefined(\n    inputContext.configuration,\n    inputContext.wf06_configuration\n  );\n\n  output.lease_seconds = firstDefined(\n    inputContext.lease_seconds,\n    300\n  );\n\n  output.max_attempts = firstDefined(\n    inputContext.max_attempts,\n    5\n  );\n\n  if (!output.execution_id) {\n    throw new Error(\n      'WF06 execution_id is missing before preparing the next operation'\n    );\n  }\n\n  if (\n    output.configuration === null ||\n    typeof output.configuration !== 'object' ||\n    Array.isArray(output.configuration)\n  ) {\n    throw new Error(\n      'WF06 configuration is missing before preparing the next operation'\n    );\n  }\n}\n\nreturn {\n  json: output,\n};"
+        },
+        "type": "n8n-nodes-base.code",
+        "typeVersion": 2,
+        "position": [
+          2544,
+          -688
+        ],
+        "id": "1241332a-4dea-47f7-9c39-c25a2190551f",
+        "name": "Normalize WF06 Operation Finalization"
+      },
+      {
+        "parameters": {
+          "rules": {
+            "values": [
+              {
+                "conditions": {
+                  "options": {
+                    "caseSensitive": true,
+                    "leftValue": "",
+                    "typeValidation": "strict",
+                    "version": 3
+                  },
+                  "conditions": [
+                    {
+                      "leftValue": "={{ $json.finalization_route }}",
+                      "rightValue": "prepare_next_operation",
+                      "operator": {
+                        "type": "string",
+                        "operation": "equals"
+                      },
+                      "id": "9a9f76ed-18b6-4c1d-8f20-73e9773cebdb"
+                    }
+                  ],
+                  "combinator": "and"
+                },
+                "renameOutput": true,
+                "outputKey": "prepare_next_operation"
+              },
+              {
+                "conditions": {
+                  "options": {
+                    "caseSensitive": true,
+                    "leftValue": "",
+                    "typeValidation": "strict",
+                    "version": 3
+                  },
+                  "conditions": [
+                    {
+                      "id": "e9aa3327-3fc2-4395-a85a-ba775411a89e",
+                      "leftValue": "={{ $json.finalization_route }}",
+                      "rightValue": "return_retryable_failure",
+                      "operator": {
+                        "type": "string",
+                        "operation": "equals",
+                        "name": "filter.operator.equals"
+                      }
+                    }
+                  ],
+                  "combinator": "and"
+                },
+                "renameOutput": true,
+                "outputKey": "return_retryable_failure"
+              },
+              {
+                "conditions": {
+                  "options": {
+                    "caseSensitive": true,
+                    "leftValue": "",
+                    "typeValidation": "strict",
+                    "version": 3
+                  },
+                  "conditions": [
+                    {
+                      "id": "e76fd861-4fc6-408a-9bd9-6d6444a01325",
+                      "leftValue": "={{ $json.finalization_route }}",
+                      "rightValue": "operator_intervention",
+                      "operator": {
+                        "type": "string",
+                        "operation": "equals",
+                        "name": "filter.operator.equals"
+                      }
+                    }
+                  ],
+                  "combinator": "and"
+                },
+                "renameOutput": true,
+                "outputKey": "operator_intervention"
+              }
+            ]
+          },
+          "options": {
+            "fallbackOutput": "extra"
+          }
+        },
+        "type": "n8n-nodes-base.switch",
+        "typeVersion": 3.4,
+        "position": [
+          2752,
+          -688
+        ],
+        "id": "fd2f2f19-9e6c-4bb9-9a11-5753db1a805c",
+        "name": "Route WF06 Operation Finalization"
+      },
+      {
+        "parameters": {
+          "mode": "runOnceForEachItem",
+          "jsCode": "// Build the deterministic Google Calendar reconciliation query\n// and the exact event creation request.\n\nconst input = $json ?? {};\n\nfunction isPlainObject(value) {\n  return (\n    value !== null &&\n    typeof value === 'object' &&\n    !Array.isArray(value)\n  );\n}\n\nfunction requireText(value, fieldName) {\n  const normalized = String(value ?? '').trim();\n\n  if (normalized === '') {\n    throw new Error(\n      `${fieldName} must not be blank`,\n    );\n  }\n\n  return normalized;\n}\n\nfunction requireEmail(value, fieldName) {\n  const normalized = requireText(\n    value,\n    fieldName,\n  ).toLowerCase();\n\n  if (\n    !/^[^\\s@]+@[^\\s@]+\\.[^\\s@]+$/.test(\n      normalized,\n    )\n  ) {\n    throw new Error(\n      `${fieldName} must be a valid email address`,\n    );\n  }\n\n  return normalized;\n}\n\nif (\n  input.next_action !== 'process_operation' ||\n  input.operation_type !== 'create_kickoff_event'\n) {\n  throw new Error(\n    'Build Calendar Reconciliation Request received an invalid operation',\n  );\n}\n\nif (!isPlainObject(input.request_summary)) {\n  throw new Error(\n    'Calendar request_summary must be a JSON object',\n  );\n}\n\nconst request = input.request_summary;\n\nconst calendarId = requireText(\n  request.calendar_id,\n  'calendar_id',\n);\n\nconst eventSummary = requireText(\n  request.event_summary,\n  'event_summary',\n);\n\nconst startAt = requireText(\n  request.start_at,\n  'start_at',\n);\n\nconst endAt = requireText(\n  request.end_at,\n  'end_at',\n);\n\nconst timezone = requireText(\n  request.timezone,\n  'timezone',\n);\n\nconst driveFolderId = requireText(\n  request.drive_folder_id,\n  'drive_folder_id',\n);\n\nconst driveFolderLink = requireText(\n  input.body?.webViewLink ??\n    request.drive_folder_link,\n  'drive_folder_link',\n);\n\nconst externalClientId = requireText(\n  request.external_client_id,\n  'external_client_id',\n);\n\nconst onboardingCaseId = requireText(\n  request.onboarding_case_id,\n  'onboarding_case_id',\n);\n\nconst operationKeyHash = requireText(\n  request.operation_key_hash,\n  'operation_key_hash',\n).toLowerCase();\n\nconst sendUpdates = requireText(\n  request.send_updates,\n  'send_updates',\n);\n\nif (onboardingCaseId !== input.case_id) {\n  throw new Error(\n    'Calendar onboarding_case_id does not match case_id',\n  );\n}\n\nif (\n  externalClientId !== input.external_client_id\n) {\n  throw new Error(\n    'Calendar external_client_id does not match the case context',\n  );\n}\n\nif (\n  !/^[0-9a-f]{32}$/.test(operationKeyHash)\n) {\n  throw new Error(\n    'Calendar operation_key_hash must contain 32 lowercase hexadecimal characters',\n  );\n}\n\nif (sendUpdates !== 'all') {\n  throw new Error(\n    'Calendar send_updates must be all',\n  );\n}\n\nconst startTimestamp = Date.parse(startAt);\nconst endTimestamp = Date.parse(endAt);\n\nif (\n  !Number.isFinite(startTimestamp) ||\n  !Number.isFinite(endTimestamp) ||\n  endTimestamp <= startTimestamp\n) {\n  throw new Error(\n    'Calendar start_at and end_at must define a valid positive interval',\n  );\n}\n\nif (!Array.isArray(request.attendees)) {\n  throw new Error(\n    'Calendar attendees must be an array',\n  );\n}\n\nconst attendees = request.attendees.map(\n  (value, index) =>\n    requireEmail(\n      value,\n      `attendees[${index}]`,\n    ),\n);\n\nif (attendees.length === 0) {\n  throw new Error(\n    'Calendar attendees must not be empty',\n  );\n}\n\nif (!driveFolderLink.toLowerCase().startsWith('https://')) {\n  throw new Error(\n    'drive_folder_link must use HTTPS',\n  );\n}\n\nconst calendarApiUrl =\n  `https://www.googleapis.com/calendar/v3/calendars/${encodeURIComponent(calendarId)}/events`;\n\nreturn {\n  json: {\n    ...input,\n\n    provider:\n      'google_calendar',\n\n    calendar_search_url:\n      calendarApiUrl,\n\n    calendar_create_url:\n      calendarApiUrl,\n\n    calendar_case_marker:\n      `onboardingCaseId=${onboardingCaseId}`,\n\n    calendar_operation_marker:\n      `operationKeyHash=${operationKeyHash}`,\n\n    calendar_send_updates:\n      sendUpdates,\n\n    calendar_expected: {\n      calendar_id:\n        calendarId,\n\n      event_summary:\n        eventSummary,\n\n      start_at:\n        startAt,\n\n      end_at:\n        endAt,\n\n      timezone,\n\n      attendees,\n\n      drive_folder_id:\n        driveFolderId,\n\n      drive_folder_link:\n        driveFolderLink,\n\n      external_client_id:\n        externalClientId,\n\n      onboarding_case_id:\n        onboardingCaseId,\n\n      operation_key_hash:\n        operationKeyHash,\n\n      send_updates:\n        sendUpdates,\n    },\n\n    calendar_create_request_body: {\n      summary:\n        eventSummary,\n\n      description: [\n        `External client ID: ${externalClientId}`,\n        `Onboarding case ID: ${onboardingCaseId}`,\n        `Drive folder: ${driveFolderLink}`,\n      ].join('\\n'),\n\n      start: {\n        dateTime:\n          startAt,\n\n        timeZone:\n          timezone,\n      },\n\n      end: {\n        dateTime:\n          endAt,\n\n        timeZone:\n          timezone,\n      },\n\n      attendees: attendees.map(\n        (email) => ({\n          email,\n        }),\n      ),\n\n      extendedProperties: {\n        private: {\n          onboardingCaseId:\n            onboardingCaseId,\n\n          operationKeyHash:\n            operationKeyHash,\n        },\n      },\n    },\n\n    provider_request_started_at:\n      new Date().toISOString(),\n  },\n};"
+        },
+        "type": "n8n-nodes-base.code",
+        "typeVersion": 2,
+        "position": [
+          -160,
+          -496
+        ],
+        "id": "f868c20d-77ee-4e88-b374-2414d2053821",
+        "name": "Build Calendar Reconciliation Request"
+      },
+      {
+        "parameters": {
+          "url": "={{ $json.calendar_search_url }}",
+          "authentication": "predefinedCredentialType",
+          "nodeCredentialType": "googleCalendarOAuth2Api",
+          "sendQuery": true,
+          "queryParameters": {
+            "parameters": [
+              {
+                "name": "privateExtendedProperty",
+                "value": "={{ $json.calendar_case_marker }}"
+              },
+              {
+                "name": "privateExtendedProperty",
+                "value": "={{ $json.calendar_operation_marker }}"
+              },
+              {
+                "name": "showDeleted",
+                "value": "true"
+              },
+              {
+                "name": "maxResults",
+                "value": "3"
+              }
+            ]
+          },
+          "options": {}
+        },
+        "type": "n8n-nodes-base.httpRequest",
+        "typeVersion": 4.4,
+        "position": [
+          32,
+          -320
+        ],
+        "id": "2a5b40e6-82fa-4431-8ace-7e6f9a965f92",
+        "name": "Search Calendar Event",
+        "credentials": {
+          "googleCalendarOAuth2Api": {
+            "id": "1kqIsPf2l5cQRz68",
+            "name": "Google Calendar account"
+          }
+        },
+        "onError": "continueErrorOutput"
+      },
+      {
+        "parameters": {
+          "mode": "combine",
+          "combineBy": "combineByPosition",
+          "options": {}
+        },
+        "type": "n8n-nodes-base.merge",
+        "typeVersion": 3.2,
+        "position": [
+          720,
+          -400
+        ],
+        "id": "93d9d51e-c2b2-4a90-89c0-05d8377af8d8",
+        "name": "Merge Calendar Search Success Context"
+      },
+      {
+        "parameters": {
+          "mode": "combine",
+          "combineBy": "combineByPosition",
+          "options": {}
+        },
+        "type": "n8n-nodes-base.merge",
+        "typeVersion": 3.2,
+        "position": [
+          720,
+          -208
+        ],
+        "id": "db08bf18-fa69-4ac7-9700-61a9464a2f94",
+        "name": "Merge Calendar Search Error Context"
+      },
+      {
+        "parameters": {
+          "mode": "runOnceForEachItem",
+          "jsCode": "const input = $json;\n\nfunction cleanText(value) {\n  if (value === null || value === undefined) {\n    return null;\n  }\n\n  const normalized = String(value).trim();\n\n  return normalized === '' ? null : normalized;\n}\n\nfunction parseInteger(value) {\n  const parsed = Number.parseInt(String(value ?? ''), 10);\n\n  return Number.isFinite(parsed) ? parsed : null;\n}\n\nfunction isPlainObject(value) {\n  return (\n    value !== null &&\n    typeof value === 'object' &&\n    !Array.isArray(value)\n  );\n}\n\nfunction normalizeEmail(value) {\n  return String(value ?? '').trim().toLowerCase();\n}\n\nfunction sameInstant(actualValue, expectedValue) {\n  const actualTimestamp = Date.parse(\n    String(actualValue ?? '')\n  );\n\n  const expectedTimestamp = Date.parse(\n    String(expectedValue ?? '')\n  );\n\n  return (\n    Number.isFinite(actualTimestamp) &&\n    Number.isFinite(expectedTimestamp) &&\n    actualTimestamp === expectedTimestamp\n  );\n}\n\nfunction parseMarker(value) {\n  const marker = cleanText(value);\n\n  if (!marker) {\n    return null;\n  }\n\n  const separatorIndex = marker.indexOf('=');\n\n  if (\n    separatorIndex <= 0 ||\n    separatorIndex === marker.length - 1\n  ) {\n    return null;\n  }\n\n  return {\n    key: marker.slice(0, separatorIndex),\n    value: marker.slice(separatorIndex + 1),\n  };\n}\n\nfunction buildContext() {\n  const context = { ...input };\n\n  const providerResponseFields = [\n    'kind',\n    'etag',\n    'summary',\n    'description',\n    'updated',\n    'timeZone',\n    'accessRole',\n    'defaultReminders',\n    'nextPageToken',\n    'nextSyncToken',\n    'items',\n    'error',\n    'message',\n    'name',\n    'stack',\n    'code',\n    'status',\n    'statusCode',\n    'httpCode',\n  ];\n\n  for (const field of providerResponseFields) {\n    delete context[field];\n  }\n\n  return context;\n}\n\nfunction buildFailure({\n  route,\n  retryable,\n  errorClass,\n  errorCode,\n  errorMessage,\n  httpStatus = null,\n  providerRetryAfterSeconds = null,\n  responseSummary = null,\n}) {\n  return {\n    json: {\n      ...buildContext(),\n      calendar_search_route: route,\n      provider: 'google_calendar',\n      retryable,\n      error_class: errorClass,\n      error_code: errorCode,\n      error_message: errorMessage,\n      http_status: httpStatus,\n      provider_retry_after_seconds:\n        providerRetryAfterSeconds,\n      provider_response_summary:\n        responseSummary,\n    },\n  };\n}\n\nconst rawError = input.error ?? null;\n\nif (rawError !== null && rawError !== undefined) {\n  const errorObject =\n    typeof rawError === 'object'\n      ? rawError\n      : {};\n\n  const errorMessage =\n    cleanText(errorObject.message) ??\n    cleanText(input.message) ??\n    cleanText(rawError) ??\n    'Google Calendar search failed';\n\n  let httpStatus =\n    parseInteger(errorObject.status) ??\n    parseInteger(errorObject.statusCode) ??\n    parseInteger(errorObject.httpCode) ??\n    parseInteger(input.statusCode) ??\n    parseInteger(input.httpCode);\n\n  if (httpStatus === null) {\n    const statusMatch =\n      errorMessage.match(/\\b([45][0-9]{2})\\b/);\n\n    if (statusMatch) {\n      httpStatus = Number.parseInt(\n        statusMatch[1],\n        10,\n      );\n    }\n  }\n\n  const retryableStatuses = new Set([\n    408,\n    425,\n    429,\n    500,\n    502,\n    503,\n    504,\n  ]);\n\n  const retryable =\n    httpStatus === null ||\n    retryableStatuses.has(httpStatus);\n\n  return buildFailure({\n    route: retryable\n      ? 'finalize_retryable_failure'\n      : 'finalize_terminal_failure',\n    retryable,\n    errorClass: 'google_calendar_search_failed',\n    errorCode:\n      cleanText(errorObject.code) ??\n      cleanText(errorObject.name) ??\n      cleanText(input.code) ??\n      'calendar_search_error',\n    errorMessage,\n    httpStatus,\n  });\n}\n\nif (!Array.isArray(input.items)) {\n  return buildFailure({\n    route: 'finalize_retryable_failure',\n    retryable: true,\n    errorClass: 'invalid_calendar_search_response',\n    errorCode: 'missing_items_array',\n    errorMessage:\n      'Google Calendar search response does not contain an items array',\n  });\n}\n\nconst caseMarker =\n  parseMarker(input.calendar_case_marker);\n\nconst operationMarker =\n  parseMarker(input.calendar_operation_marker);\n\nif (!caseMarker || !operationMarker) {\n  return buildFailure({\n    route: 'finalize_terminal_failure',\n    retryable: false,\n    errorClass: 'invalid_calendar_marker_context',\n    errorCode: 'invalid_extended_property_marker',\n    errorMessage:\n      'Calendar reconciliation markers are missing or invalid',\n  });\n}\n\nconst expected = input.calendar_expected;\n\nif (!isPlainObject(expected)) {\n  return buildFailure({\n    route: 'finalize_terminal_failure',\n    retryable: false,\n    errorClass: 'invalid_calendar_expected_context',\n    errorCode: 'missing_calendar_expected',\n    errorMessage:\n      'Calendar reconciliation expected metadata is missing or invalid',\n  });\n}\n\nconst requiredExpectedTextFields = [\n  'event_summary',\n  'start_at',\n  'end_at',\n  'timezone',\n  'onboarding_case_id',\n  'operation_key_hash',\n];\n\nconst missingExpectedFields =\n  requiredExpectedTextFields.filter(\n    (fieldName) => !cleanText(expected[fieldName])\n  );\n\nconst expectedAttendees =\n  Array.isArray(expected.attendees)\n    ? expected.attendees\n        .map(normalizeEmail)\n        .filter((email) => email !== '')\n    : [];\n\nif (\n  missingExpectedFields.length > 0 ||\n  expectedAttendees.length === 0 ||\n  !Number.isFinite(\n    Date.parse(String(expected.start_at ?? ''))\n  ) ||\n  !Number.isFinite(\n    Date.parse(String(expected.end_at ?? ''))\n  )\n) {\n  return buildFailure({\n    route: 'finalize_terminal_failure',\n    retryable: false,\n    errorClass: 'invalid_calendar_expected_context',\n    errorCode: 'invalid_calendar_expected',\n    errorMessage:\n      'Calendar reconciliation expected metadata is incomplete or invalid',\n    responseSummary: {\n      missing_expected_fields:\n        missingExpectedFields,\n      expected_attendee_count:\n        expectedAttendees.length,\n    },\n  });\n}\n\nconst matchingEvents = input.items.filter((event) => {\n  const privateProperties =\n    event?.extendedProperties?.private;\n\n  if (\n    !privateProperties ||\n    typeof privateProperties !== 'object'\n  ) {\n    return false;\n  }\n\n  return (\n    cleanText(privateProperties[caseMarker.key]) ===\n      caseMarker.value &&\n    cleanText(\n      privateProperties[operationMarker.key],\n    ) === operationMarker.value\n  );\n});\n\nif (\n  input.items.length > 0 &&\n  matchingEvents.length !== input.items.length\n) {\n  return buildFailure({\n    route: 'finalize_terminal_failure',\n    retryable: false,\n    errorClass: 'calendar_marker_mismatch',\n    errorCode: 'unexpected_search_result_marker',\n    errorMessage:\n      'Google Calendar returned an event without the expected private markers',\n  });\n}\n\nif (matchingEvents.length > 1) {\n  return buildFailure({\n    route: 'finalize_terminal_failure',\n    retryable: false,\n    errorClass: 'calendar_reconciliation_ambiguity',\n    errorCode: 'multiple_matching_events',\n    errorMessage:\n      'More than one Google Calendar event matches the deterministic markers',\n  });\n}\n\nif (matchingEvents.length === 0) {\n  return {\n    json: {\n      ...buildContext(),\n      calendar_search_route:\n        'create_kickoff_event',\n    },\n  };\n}\n\nconst event = matchingEvents[0];\n\nif (cleanText(event.status) === 'cancelled') {\n  return buildFailure({\n    route: 'finalize_terminal_failure',\n    retryable: false,\n    errorClass: 'calendar_event_cancelled',\n    errorCode: 'matching_event_cancelled',\n    errorMessage:\n      'The matching Google Calendar event is cancelled',\n  });\n}\n\nconst externalId = cleanText(event.id);\n\nif (!externalId) {\n  return buildFailure({\n    route: 'finalize_retryable_failure',\n    retryable: true,\n    errorClass: 'invalid_calendar_search_response',\n    errorCode: 'missing_event_id',\n    errorMessage:\n      'The matching Google Calendar event has no identifier',\n  });\n}\n\nconst privateProperties =\n  isPlainObject(event.extendedProperties?.private)\n    ? event.extendedProperties.private\n    : {};\n\nconst actualAttendees =\n  Array.isArray(event.attendees)\n    ? event.attendees\n        .map((attendee) =>\n          normalizeEmail(attendee?.email)\n        )\n        .filter((email) => email !== '')\n    : [];\n\nconst metadataChecks = {\n  event_summary_matches:\n    cleanText(event.summary) ===\n      cleanText(expected.event_summary),\n\n  start_matches:\n    sameInstant(\n      event.start?.dateTime,\n      expected.start_at\n    ),\n\n  end_matches:\n    sameInstant(\n      event.end?.dateTime,\n      expected.end_at\n    ),\n\n  start_timezone_matches:\n    cleanText(event.start?.timeZone) ===\n      cleanText(expected.timezone),\n\n  end_timezone_matches:\n    cleanText(event.end?.timeZone) ===\n      cleanText(expected.timezone),\n\n  attendees_match:\n    expectedAttendees.every((email) =>\n      actualAttendees.includes(email)\n    ),\n\n  onboarding_case_marker_matches:\n    cleanText(\n      privateProperties.onboardingCaseId\n    ) === cleanText(expected.onboarding_case_id),\n\n  operation_key_marker_matches:\n    cleanText(\n      privateProperties.operationKeyHash\n    ) === cleanText(expected.operation_key_hash),\n\n  not_cancelled:\n    cleanText(event.status) !== 'cancelled',\n};\n\nconst validMetadata =\n  Object.values(metadataChecks).every(\n    (value) => value === true\n  );\n\nif (!validMetadata) {\n  return buildFailure({\n    route: 'finalize_terminal_failure',\n    retryable: false,\n    errorClass: 'provider_consistency',\n    errorCode:\n      'calendar_reconciled_event_metadata_mismatch',\n    errorMessage:\n      'The existing Google Calendar event does not match the immutable WF06 request',\n    responseSummary: {\n      marker_verified:\n        metadataChecks\n          .onboarding_case_marker_matches &&\n        metadataChecks\n          .operation_key_marker_matches,\n      created: false,\n      event_id: externalId,\n      ...metadataChecks,\n    },\n  });\n}\n\nreturn {\n  json: {\n    ...buildContext(),\n    calendar_search_route: 'finalize_success',\n    external_id: externalId,\n    provider: 'google_calendar',\n    reconciled: true,\n    provider_response_summary: {\n      marker_verified: true,\n      created: false,\n      html_link:\n        cleanText(event.htmlLink),\n      status:\n        cleanText(event.status),\n      start:\n        cleanText(event.start?.dateTime) ??\n        cleanText(event.start?.date),\n      end:\n        cleanText(event.end?.dateTime) ??\n        cleanText(event.end?.date),\n      attendee_count: Array.isArray(event.attendees)\n        ? event.attendees.length\n        : 0,\n    },\n  },\n};"
+        },
+        "type": "n8n-nodes-base.code",
+        "typeVersion": 2,
+        "position": [
+          1040,
+          -288
+        ],
+        "id": "85687caa-8c70-4111-878c-00bed1a158ae",
+        "name": "Normalize Calendar Search Result"
+      },
+      {
+        "parameters": {
+          "rules": {
+            "values": [
+              {
+                "conditions": {
+                  "options": {
+                    "caseSensitive": true,
+                    "leftValue": "",
+                    "typeValidation": "strict",
+                    "version": 3
+                  },
+                  "conditions": [
+                    {
+                      "leftValue": "={{ $json.calendar_search_route }}",
+                      "rightValue": "create_kickoff_event",
+                      "operator": {
+                        "type": "string",
+                        "operation": "equals"
+                      },
+                      "id": "0bf8af17-a6c5-4668-a654-cb9e7e389f2a"
+                    }
+                  ],
+                  "combinator": "and"
+                },
+                "renameOutput": true,
+                "outputKey": "create_kickoff_event"
+              },
+              {
+                "conditions": {
+                  "options": {
+                    "caseSensitive": true,
+                    "leftValue": "",
+                    "typeValidation": "strict",
+                    "version": 3
+                  },
+                  "conditions": [
+                    {
+                      "id": "c428e4f7-9a11-4cc2-9ebe-9f21e408a1ad",
+                      "leftValue": "={{ $json.calendar_search_route }}",
+                      "rightValue": "finalize_success",
+                      "operator": {
+                        "type": "string",
+                        "operation": "equals",
+                        "name": "filter.operator.equals"
+                      }
+                    }
+                  ],
+                  "combinator": "and"
+                },
+                "renameOutput": true,
+                "outputKey": "finalize_success"
+              },
+              {
+                "conditions": {
+                  "options": {
+                    "caseSensitive": true,
+                    "leftValue": "",
+                    "typeValidation": "strict",
+                    "version": 3
+                  },
+                  "conditions": [
+                    {
+                      "id": "ff911bd5-b2e9-448e-8019-201aa4103b40",
+                      "leftValue": "={{ $json.calendar_search_route }}",
+                      "rightValue": "finalize_retryable_failure",
+                      "operator": {
+                        "type": "string",
+                        "operation": "equals",
+                        "name": "filter.operator.equals"
+                      }
+                    }
+                  ],
+                  "combinator": "and"
+                },
+                "renameOutput": true,
+                "outputKey": "finalize_retryable_failure"
+              },
+              {
+                "conditions": {
+                  "options": {
+                    "caseSensitive": true,
+                    "leftValue": "",
+                    "typeValidation": "strict",
+                    "version": 3
+                  },
+                  "conditions": [
+                    {
+                      "id": "ea7cf4a4-add9-47d4-b6d5-2b5b6ddc3be2",
+                      "leftValue": "={{ $json.calendar_search_route }}",
+                      "rightValue": "finalize_terminal_failure",
+                      "operator": {
+                        "type": "string",
+                        "operation": "equals",
+                        "name": "filter.operator.equals"
+                      }
+                    }
+                  ],
+                  "combinator": "and"
+                },
+                "renameOutput": true,
+                "outputKey": "finalize_terminal_failure"
+              }
+            ]
+          },
+          "options": {
+            "fallbackOutput": "extra"
+          }
+        },
+        "type": "n8n-nodes-base.switch",
+        "typeVersion": 3.4,
+        "position": [
+          1248,
+          -176
+        ],
+        "id": "9620770e-8b29-4a8a-b34c-dce58dd39c19",
+        "name": "Route Calendar Search Result"
+      },
+      {
+        "parameters": {
+          "mode": "runOnceForEachItem",
+          "jsCode": "const input = $json;\nconst receivedAt = new Date().toISOString();\n\nconst isObject = (value) =>\n  value !== null &&\n  typeof value === 'object' &&\n  !Array.isArray(value);\n\nconst requireString = (value, fieldName) => {\n  if (\n    typeof value !== 'string' ||\n    value.trim() === ''\n  ) {\n    throw new Error(\n      `${fieldName} must be a non-empty string`,\n    );\n  }\n\n  return value.trim();\n};\n\nconst parseHttpStatus = (value) => {\n  const parsed = Number(value);\n\n  return (\n    Number.isInteger(parsed) &&\n    parsed >= 100 &&\n    parsed <= 599\n  )\n    ? parsed\n    : null;\n};\n\nconst parseRetryAfterSeconds = (headers) => {\n  if (!isObject(headers)) {\n    return null;\n  }\n\n  const raw =\n    headers['retry-after'] ??\n    headers['Retry-After'] ??\n    null;\n\n  if (raw === null || raw === undefined) {\n    return null;\n  }\n\n  const seconds = Number(raw);\n\n  if (\n    Number.isFinite(seconds) &&\n    seconds >= 0\n  ) {\n    return Math.ceil(seconds);\n  }\n\n  const retryAt = Date.parse(String(raw));\n\n  return Number.isFinite(retryAt)\n    ? Math.max(\n        0,\n        Math.ceil(\n          (retryAt - Date.now()) / 1000,\n        ),\n      )\n    : null;\n};\n\nconst normalizeEmail = (value) =>\n  typeof value === 'string'\n    ? value.trim().toLowerCase()\n    : '';\n\nconst sameInstant = (actual, expected) => {\n  const actualTimestamp = Date.parse(\n    String(actual ?? ''),\n  );\n\n  const expectedTimestamp = Date.parse(\n    String(expected ?? ''),\n  );\n\n  return (\n    Number.isFinite(actualTimestamp) &&\n    Number.isFinite(expectedTimestamp) &&\n    actualTimestamp === expectedTimestamp\n  );\n};\n\nrequireString(input.case_id, 'case_id');\n\nrequireString(\n  input.operation_id,\n  'operation_id',\n);\n\nrequireString(\n  input.lease_owner,\n  'lease_owner',\n);\n\nif (!isObject(input.calendar_expected)) {\n  throw new Error(\n    'calendar_expected must be an object',\n  );\n}\n\nconst expected = {\n  event_summary: requireString(\n    input.calendar_expected.event_summary,\n    'calendar_expected.event_summary',\n  ),\n\n  start_at: requireString(\n    input.calendar_expected.start_at,\n    'calendar_expected.start_at',\n  ),\n\n  end_at: requireString(\n    input.calendar_expected.end_at,\n    'calendar_expected.end_at',\n  ),\n\n  timezone: requireString(\n    input.calendar_expected.timezone,\n    'calendar_expected.timezone',\n  ),\n\n  onboarding_case_id: requireString(\n    input.calendar_expected\n      .onboarding_case_id,\n    'calendar_expected.onboarding_case_id',\n  ),\n\n  operation_key_hash: requireString(\n    input.calendar_expected\n      .operation_key_hash,\n    'calendar_expected.operation_key_hash',\n  ),\n};\n\nif (\n  !Array.isArray(\n    input.calendar_expected.attendees,\n  )\n) {\n  throw new Error(\n    'calendar_expected.attendees must be an array',\n  );\n}\n\nconst expectedAttendees =\n  input.calendar_expected.attendees.map(\n    (value, index) =>\n      requireString(\n        value,\n        `calendar_expected.attendees[${index}]`,\n      ).toLowerCase(),\n  );\n\nconst httpStatus = parseHttpStatus(\n  input.statusCode ??\n  input.status_code ??\n  input.http_status,\n);\n\nconst headers = isObject(input.headers)\n  ? input.headers\n  : {};\n\nconst body = isObject(input.body)\n  ? input.body\n  : null;\n\nconst retryAfterSeconds =\n  parseRetryAfterSeconds(headers);\n\nconst buildResult = (overrides) => ({\n  json: {\n    ...input,\n    workflow: 'WF06',\n    provider: 'google_calendar',\n    http_status: httpStatus,\n    provider_response_received_at:\n      receivedAt,\n    ...overrides,\n  },\n});\n\nconst buildFailure = ({\n  providerOutcome,\n  nextAction,\n  errorClass,\n  errorCode,\n  errorMessage,\n  retryable,\n  responseSummary = null,\n}) =>\n  buildResult({\n    provider_outcome:\n      providerOutcome,\n\n    next_action:\n      nextAction,\n\n    external_id:\n      null,\n\n    reconciled:\n      false,\n\n    provider_response_summary:\n      responseSummary,\n\n    error_class:\n      errorClass,\n\n    error_code:\n      errorCode,\n\n    error_message:\n      errorMessage,\n\n    retryable,\n\n    provider_retry_after_seconds:\n      retryAfterSeconds,\n  });\n\nconst transportError = isObject(input.error)\n  ? input.error\n  : (\n      typeof input.error === 'string' &&\n      input.error.trim() !== ''\n    )\n    ? {\n        message: input.error.trim(),\n      }\n    : null;\n\nif (\n  transportError !== null &&\n  httpStatus === null\n) {\n  return buildFailure({\n    providerOutcome:\n      'transport_error',\n\n    nextAction:\n      'finalize_retryable_failure',\n\n    errorClass:\n      'transport',\n\n    errorCode:\n      'calendar_create_transport_error',\n\n    errorMessage:\n      (\n        typeof transportError.message ===\n          'string' &&\n        transportError.message.trim() !== ''\n      )\n        ? transportError.message.trim()\n        : 'Google Calendar event creation failed before an HTTP response was received',\n\n    retryable:\n      true,\n  });\n}\n\nif (httpStatus === null) {\n  return buildFailure({\n    providerOutcome:\n      'invalid_response',\n\n    nextAction:\n      'finalize_retryable_failure',\n\n    errorClass:\n      'protocol',\n\n    errorCode:\n      'calendar_create_missing_http_status',\n\n    errorMessage:\n      'Google Calendar event creation did not return a valid HTTP status',\n\n    retryable:\n      true,\n  });\n}\n\nif (\n  httpStatus !== 200 &&\n  httpStatus !== 201\n) {\n  const retryable =\n    httpStatus === 408 ||\n    httpStatus === 425 ||\n    httpStatus === 429 ||\n    httpStatus >= 500;\n\n  const providerError = isObject(\n    body?.error,\n  )\n    ? body.error\n    : {};\n\n  const providerCode =\n    providerError.status ??\n    providerError.code ??\n    `http_${httpStatus}`;\n\n  const providerMessage =\n    (\n      typeof providerError.message ===\n        'string' &&\n      providerError.message.trim() !== ''\n    )\n      ? providerError.message.trim()\n      : `Google Calendar event creation returned HTTP ${httpStatus}`;\n\n  return buildFailure({\n    providerOutcome:\n      'http_error',\n\n    nextAction:\n      retryable\n        ? 'finalize_retryable_failure'\n        : 'finalize_terminal_failure',\n\n    errorClass:\n      'provider_http',\n\n    errorCode:\n      `calendar_create_${String(\n        providerCode,\n      ).toLowerCase()}`,\n\n    errorMessage:\n      providerMessage,\n\n    retryable,\n\n    responseSummary: {\n      marker_verified:\n        false,\n\n      created:\n        false,\n    },\n  });\n}\n\nif (body === null) {\n  return buildFailure({\n    providerOutcome:\n      'invalid_response',\n\n    nextAction:\n      'finalize_retryable_failure',\n\n    errorClass:\n      'protocol',\n\n    errorCode:\n      'calendar_create_invalid_response_schema',\n\n    errorMessage:\n      'Google Calendar event creation returned an invalid response body',\n\n    retryable:\n      true,\n  });\n}\n\nconst eventId =\n  typeof body.id === 'string'\n    ? body.id.trim()\n    : '';\n\nif (eventId === '') {\n  return buildFailure({\n    providerOutcome:\n      'invalid_response',\n\n    nextAction:\n      'finalize_retryable_failure',\n\n    errorClass:\n      'protocol',\n\n    errorCode:\n      'calendar_create_missing_event_id',\n\n    errorMessage:\n      'Google Calendar event creation response does not contain an event ID',\n\n    retryable:\n      true,\n\n    responseSummary: {\n      marker_verified:\n        false,\n\n      created:\n        false,\n    },\n  });\n}\n\nconst privateProperties =\n  isObject(\n    body.extendedProperties?.private,\n  )\n    ? body.extendedProperties.private\n    : {};\n\nconst actualAttendees =\n  Array.isArray(body.attendees)\n    ? body.attendees\n        .map((attendee) =>\n          normalizeEmail(attendee?.email),\n        )\n        .filter((email) => email !== '')\n    : [];\n\nconst metadataChecks = {\n  event_summary_matches:\n    body.summary === expected.event_summary,\n\n  start_matches:\n    sameInstant(\n      body.start?.dateTime,\n      expected.start_at,\n    ),\n\n  end_matches:\n    sameInstant(\n      body.end?.dateTime,\n      expected.end_at,\n    ),\n\n  start_timezone_matches:\n    body.start?.timeZone ===\n      expected.timezone,\n\n  end_timezone_matches:\n    body.end?.timeZone ===\n      expected.timezone,\n\n  attendees_match:\n    expectedAttendees.every((email) =>\n      actualAttendees.includes(email),\n    ),\n\n  onboarding_case_marker_matches:\n    privateProperties.onboardingCaseId ===\n      expected.onboarding_case_id,\n\n  operation_key_marker_matches:\n    privateProperties.operationKeyHash ===\n      expected.operation_key_hash,\n\n  not_cancelled:\n    body.status !== 'cancelled',\n};\n\nconst validMetadata =\n  Object.values(metadataChecks).every(\n    (value) => value === true,\n  );\n\nif (!validMetadata) {\n  return buildFailure({\n    providerOutcome:\n      'metadata_mismatch',\n\n    nextAction:\n      'finalize_terminal_failure',\n\n    errorClass:\n      'provider_consistency',\n\n    errorCode:\n      'calendar_created_event_metadata_mismatch',\n\n    errorMessage:\n      'Google Calendar created an event whose metadata does not match the immutable request',\n\n    retryable:\n      false,\n\n    responseSummary: {\n      marker_verified:\n        metadataChecks\n          .onboarding_case_marker_matches &&\n        metadataChecks\n          .operation_key_marker_matches,\n\n      created:\n        true,\n\n      event_id:\n        eventId,\n\n      ...metadataChecks,\n    },\n  });\n}\n\nreturn buildResult({\n  provider_outcome:\n    'created',\n\n  next_action:\n    'finalize_success',\n\n  external_id:\n    eventId,\n\n  reconciled:\n    false,\n\n  provider_response_summary: {\n    marker_verified:\n      true,\n\n    created:\n      true,\n\n    html_link:\n      typeof body.htmlLink === 'string'\n        ? body.htmlLink\n        : null,\n\n    status:\n      typeof body.status === 'string'\n        ? body.status\n        : null,\n\n    start:\n      body.start?.dateTime ?? null,\n\n    end:\n      body.end?.dateTime ?? null,\n\n    attendee_count:\n      actualAttendees.length,\n  },\n\n  error_class:\n    null,\n\n  error_code:\n    null,\n\n  error_message:\n    null,\n\n  retryable:\n    false,\n\n  provider_retry_after_seconds:\n    null,\n});"
+        },
+        "type": "n8n-nodes-base.code",
+        "typeVersion": 2,
+        "position": [
+          2176,
+          -48
+        ],
+        "id": "3a89799e-b66c-402b-b064-b4cbf04c8ebc",
+        "name": "Normalize Calendar Creation Result"
+      },
+      {
+        "parameters": {
+          "method": "POST",
+          "url": "={{ $json.calendar_create_url }}",
+          "authentication": "predefinedCredentialType",
+          "nodeCredentialType": "googleCalendarOAuth2Api",
+          "sendQuery": true,
+          "queryParameters": {
+            "parameters": [
+              {
+                "name": "sendUpdates",
+                "value": "={{ $json.calendar_send_updates }}"
+              }
+            ]
+          },
+          "sendBody": true,
+          "specifyBody": "json",
+          "jsonBody": "={{ $json.calendar_create_request_body }}",
+          "options": {
+            "response": {
+              "response": {
+                "fullResponse": true,
+                "neverError": true
+              }
+            },
+            "timeout": 30000
+          }
+        },
+        "type": "n8n-nodes-base.httpRequest",
+        "typeVersion": 4.4,
+        "position": [
+          1520,
+          112
+        ],
+        "id": "76338f9a-a57d-4b07-81a0-e5344a6d94cb",
+        "name": "Create Calendar Event",
+        "credentials": {
+          "googleCalendarOAuth2Api": {
+            "id": "1kqIsPf2l5cQRz68",
+            "name": "Google Calendar account"
+          }
+        },
+        "onError": "continueErrorOutput"
+      },
+      {
+        "parameters": {
+          "mode": "combine",
+          "combineBy": "combineByPosition",
+          "options": {}
+        },
+        "type": "n8n-nodes-base.merge",
+        "typeVersion": 3.2,
+        "position": [
+          1904,
+          -176
+        ],
+        "id": "b34e2d9b-fa15-4ba1-8b8e-b468bb86ffde",
+        "name": "Merge Calendar Creation Success Context"
+      },
+      {
+        "parameters": {
+          "mode": "combine",
+          "combineBy": "combineByPosition",
+          "options": {}
+        },
+        "type": "n8n-nodes-base.merge",
+        "typeVersion": 3.2,
+        "position": [
+          1904,
+          112
+        ],
+        "id": "7b4bbba7-1cb8-42b5-887c-dad1b67c4469",
+        "name": "Merge Calendar Creation Error Context"
+      },
+      {
+        "parameters": {
+          "rules": {
+            "values": [
+              {
+                "conditions": {
+                  "options": {
+                    "caseSensitive": true,
+                    "leftValue": "",
+                    "typeValidation": "strict",
+                    "version": 3
+                  },
+                  "conditions": [
+                    {
+                      "leftValue": "={{ $json.next_action }}",
+                      "rightValue": "finalize_success",
+                      "operator": {
+                        "type": "string",
+                        "operation": "equals"
+                      },
+                      "id": "524b8730-7c74-485d-982f-1769cbe52324"
+                    }
+                  ],
+                  "combinator": "and"
+                },
+                "renameOutput": true,
+                "outputKey": "finalize_success"
+              },
+              {
+                "conditions": {
+                  "options": {
+                    "caseSensitive": true,
+                    "leftValue": "",
+                    "typeValidation": "strict",
+                    "version": 3
+                  },
+                  "conditions": [
+                    {
+                      "id": "5528eedb-5264-4f56-8c15-7a02685834c1",
+                      "leftValue": "={{ $json.next_action }}",
+                      "rightValue": "finalize_retryable_failure",
+                      "operator": {
+                        "type": "string",
+                        "operation": "equals",
+                        "name": "filter.operator.equals"
+                      }
+                    }
+                  ],
+                  "combinator": "and"
+                },
+                "renameOutput": true,
+                "outputKey": "finalize_retryable_failure"
+              },
+              {
+                "conditions": {
+                  "options": {
+                    "caseSensitive": true,
+                    "leftValue": "",
+                    "typeValidation": "strict",
+                    "version": 3
+                  },
+                  "conditions": [
+                    {
+                      "id": "6a5a6c69-0273-4216-bdc4-4c36f21f58d7",
+                      "leftValue": "={{ $json.next_action }}",
+                      "rightValue": "finalize_terminal_failure",
+                      "operator": {
+                        "type": "string",
+                        "operation": "equals",
+                        "name": "filter.operator.equals"
+                      }
+                    }
+                  ],
+                  "combinator": "and"
+                },
+                "renameOutput": true,
+                "outputKey": "finalize_terminal_failure"
+              }
+            ]
+          },
+          "options": {
+            "fallbackOutput": "extra"
+          }
+        },
+        "type": "n8n-nodes-base.switch",
+        "typeVersion": 3.4,
+        "position": [
+          2384,
+          -80
+        ],
+        "id": "41f7263c-9f9b-4a52-88be-a5d42b2f163c",
+        "name": "Route Calendar Creation Result"
+      },
+      {
+        "parameters": {
+          "mode": "runOnceForEachItem",
+          "jsCode": "// Build the immutable Gmail reconciliation query\n// and the safe internal team notification message.\n\nconst input = $json ?? {};\n\nfunction isPlainObject(value) {\n  return (\n    value !== null &&\n    typeof value === 'object' &&\n    !Array.isArray(value)\n  );\n}\n\nfunction requireText(value, fieldName) {\n  const normalized = String(value ?? '').trim();\n\n  if (normalized === '') {\n    throw new Error(\n      `${fieldName} must not be blank`,\n    );\n  }\n\n  return normalized;\n}\n\nfunction optionalText(value) {\n  if (\n    value === null ||\n    value === undefined\n  ) {\n    return null;\n  }\n\n  const normalized = String(value).trim();\n\n  return normalized === ''\n    ? null\n    : normalized;\n}\n\nfunction requireEmail(value, fieldName) {\n  const normalized = requireText(\n    value,\n    fieldName,\n  ).toLowerCase();\n\n  if (\n    !/^[^\\s@]+@[^\\s@]+\\.[^\\s@]+$/.test(\n      normalized,\n    )\n  ) {\n    throw new Error(\n      `${fieldName} must be a valid email address`,\n    );\n  }\n\n  return normalized;\n}\n\nfunction escapeHtml(value) {\n  return String(value ?? '')\n    .replaceAll('&', '&amp;')\n    .replaceAll('<', '&lt;')\n    .replaceAll('>', '&gt;')\n    .replaceAll('\"', '&quot;')\n    .replaceAll(\"'\", '&#039;');\n}\n\nfunction requireHttpsUrl(value, fieldName) {\n  const normalized = requireText(\n    value,\n    fieldName,\n  );\n\n  if (!normalized.toLowerCase().startsWith('https://')) {\n    throw new Error(\n      `${fieldName} must use HTTPS`,\n    );\n  }\n\n  return normalized;\n}\n\nif (\n  input.next_action !== 'process_operation' ||\n  input.operation_type !== 'notify_team'\n) {\n  throw new Error(\n    'Build Team Notification Request received an invalid operation',\n  );\n}\n\nif (!isPlainObject(input.request_summary)) {\n  throw new Error(\n    'Notification request_summary must be a JSON object',\n  );\n}\n\nconst request = input.request_summary;\n\nif (!Array.isArray(request.recipients)) {\n  throw new Error(\n    'Notification recipients must be an array',\n  );\n}\n\nconst recipients = [\n  ...new Set(\n    request.recipients.map(\n      (value, index) =>\n        requireEmail(\n          value,\n          `recipients[${index}]`,\n        ),\n    ),\n  ),\n];\n\nif (recipients.length === 0) {\n  throw new Error(\n    'Notification recipients must not be empty',\n  );\n}\n\nconst senderName = requireText(\n  request.sender_name,\n  'sender_name',\n);\n\nconst templateKey = requireText(\n  request.template_key,\n  'template_key',\n);\n\nconst legalName = requireText(\n  request.legal_name,\n  'legal_name',\n);\n\nconst externalClientId = requireText(\n  request.external_client_id,\n  'external_client_id',\n);\n\nconst driveFolderId = requireText(\n  request.drive_folder_id,\n  'drive_folder_id',\n);\n\nconst driveFolderLink = requireHttpsUrl(\n  request.drive_folder_link,\n  'drive_folder_link',\n);\n\nconst calendarEventId = requireText(\n  request.calendar_event_id,\n  'calendar_event_id',\n);\n\nconst calendarEventLink = optionalText(\n  request.calendar_event_link,\n);\n\nif (calendarEventLink !== null) {\n  requireHttpsUrl(\n    calendarEventLink,\n    'calendar_event_link',\n  );\n}\n\nconst kickoffStartAt = requireText(\n  request.kickoff_start_at,\n  'kickoff_start_at',\n);\n\nconst kickoffTimezone = requireText(\n  request.kickoff_timezone,\n  'kickoff_timezone',\n);\n\nconst messageMarker = requireText(\n  request.message_marker,\n  'message_marker',\n);\n\nif (\n  !/^b2b-team-notification-[0-9a-f]{24}$/.test(\n    messageMarker,\n  )\n) {\n  throw new Error(\n    'message_marker does not match the WF06 deterministic marker format',\n  );\n}\n\nif (\n  externalClientId !==\n  requireText(\n    input.external_client_id,\n    'external_client_id context',\n  )\n) {\n  throw new Error(\n    'Notification external_client_id does not match the case context',\n  );\n}\n\nconst kickoffTimestamp = Date.parse(\n  kickoffStartAt,\n);\n\nif (!Number.isFinite(kickoffTimestamp)) {\n  throw new Error(\n    'kickoff_start_at must be a valid date-time',\n  );\n}\n\nlet kickoffDisplay;\n\ntry {\n  kickoffDisplay = new Intl.DateTimeFormat(\n    'en-GB',\n    {\n      timeZone:\n        kickoffTimezone,\n      dateStyle:\n        'full',\n      timeStyle:\n        'short',\n    },\n  ).format(\n    new Date(kickoffTimestamp),\n  );\n} catch {\n  throw new Error(\n    'kickoff_timezone must be a valid IANA time zone',\n  );\n}\n\nconst subject =\n  `[B2B Onboarding] ${legalName} is ready`;\n\nconst textBody = [\n  'B2B client onboarding has been finalized.',\n  '',\n  `Company: ${legalName}`,\n  `External client ID: ${externalClientId}`,\n  `Drive folder: ${driveFolderLink}`,\n  `Kickoff: ${kickoffDisplay} (${kickoffTimezone})`,\n  calendarEventLink === null\n    ? `Calendar event ID: ${calendarEventId}`\n    : `Calendar event: ${calendarEventLink}`,\n  '',\n  `Template: ${templateKey}`,\n  `Message marker: ${messageMarker}`,\n].join('\\n');\n\nconst calendarHtml = calendarEventLink === null\n  ? escapeHtml(calendarEventId)\n  : `<a href=\"${escapeHtml(calendarEventLink)}\">Open kickoff event</a>`;\n\nconst htmlBody = `\n<div style=\"font-family: Arial, sans-serif; line-height: 1.5;\">\n  <h2>B2B client onboarding completed</h2>\n\n  <table cellpadding=\"6\" cellspacing=\"0\" border=\"0\">\n    <tr>\n      <td><strong>Company</strong></td>\n      <td>${escapeHtml(legalName)}</td>\n    </tr>\n    <tr>\n      <td><strong>External client ID</strong></td>\n      <td>${escapeHtml(externalClientId)}</td>\n    </tr>\n    <tr>\n      <td><strong>Drive folder</strong></td>\n      <td>\n        <a href=\"${escapeHtml(driveFolderLink)}\">Open client folder</a>\n      </td>\n    </tr>\n    <tr>\n      <td><strong>Kickoff</strong></td>\n      <td>\n        ${escapeHtml(kickoffDisplay)}\n        (${escapeHtml(kickoffTimezone)})\n      </td>\n    </tr>\n    <tr>\n      <td><strong>Calendar event</strong></td>\n      <td>${calendarHtml}</td>\n    </tr>\n  </table>\n\n  <p style=\"font-size: 12px; color: #666;\">\n    ${escapeHtml(messageMarker)}\n  </p>\n</div>\n`.trim();\n\nreturn {\n  json: {\n    ...input,\n\n    provider:\n      'gmail',\n\n    gmail_search_query:\n      `in:sent \"${messageMarker}\"`,\n\n    notification_recipients:\n      recipients,\n\n    notification_send_to:\n      recipients.join(', '),\n\n    notification_sender_name:\n      senderName,\n\n    notification_template_key:\n      templateKey,\n\n    notification_subject:\n      subject,\n\n    notification_text:\n      textBody,\n\n    notification_html:\n      htmlBody,\n\n    notification_message_marker:\n      messageMarker,\n\n    notification_expected: {\n      recipients,\n      template_key:\n        templateKey,\n      legal_name:\n        legalName,\n      external_client_id:\n        externalClientId,\n      drive_folder_id:\n        driveFolderId,\n      drive_folder_link:\n        driveFolderLink,\n      calendar_event_id:\n        calendarEventId,\n      calendar_event_link:\n        calendarEventLink,\n      kickoff_start_at:\n        kickoffStartAt,\n      kickoff_timezone:\n        kickoffTimezone,\n      message_marker:\n        messageMarker,\n    },\n\n    provider_request_started_at:\n      new Date().toISOString(),\n  },\n};"
+        },
+        "type": "n8n-nodes-base.code",
+        "typeVersion": 2,
+        "position": [
+          -512,
+          -1120
+        ],
+        "id": "62afffeb-0094-44a4-9e8e-1c1ceb61d33d",
+        "name": "Build Team Notification Request"
+      },
+      {
+        "parameters": {
+          "operation": "getAll",
+          "limit": 3,
+          "filters": {
+            "q": "={{ $json.gmail_search_query }}"
+          }
+        },
+        "type": "n8n-nodes-base.gmail",
+        "typeVersion": 2.2,
+        "position": [
+          -320,
+          -992
+        ],
+        "id": "8fb86b4e-78be-4320-8af9-443c23d1ed9e",
+        "name": "Search Existing Team Notification",
+        "webhookId": "ce642bf3-112f-4720-bb8b-dfd4960bcbd1",
+        "alwaysOutputData": true,
+        "credentials": {
+          "gmailOAuth2": {
+            "id": "LcK92xSDT34cJaIK",
+            "name": "Gmail account"
+          }
+        },
+        "onError": "continueErrorOutput"
+      },
+      {
+        "parameters": {
+          "jsCode": "// Convert zero, one, or several Gmail messages\n// into one deterministic reconciliation result.\n\nconst inputItems = $input.all();\n\nconst messages = inputItems\n  .map((item) => item.json ?? {})\n  .filter((message) => {\n    return (\n      typeof message.id === 'string' &&\n      message.id.trim() !== ''\n    );\n  })\n  .map((message) => ({\n    id:\n      message.id.trim(),\n\n    thread_id:\n      typeof message.threadId === 'string' &&\n      message.threadId.trim() !== ''\n        ? message.threadId.trim()\n        : null,\n\n    label_ids:\n      Array.isArray(message.labelIds)\n        ? message.labelIds.map(String)\n        : [],\n  }));\n\nreturn [\n  {\n    json: {\n      gmail_search_messages:\n        messages,\n\n      gmail_search_match_count:\n        messages.length,\n    },\n  },\n];"
+        },
+        "type": "n8n-nodes-base.code",
+        "typeVersion": 2,
+        "position": [
+          -112,
+          -1056
+        ],
+        "id": "88ab6ff2-3be5-421f-a8b2-f16ad934fc5b",
+        "name": "Aggregate Team Notification Search Results"
+      },
+      {
+        "parameters": {
+          "mode": "combine",
+          "combineBy": "combineByPosition",
+          "options": {}
+        },
+        "type": "n8n-nodes-base.merge",
+        "typeVersion": 3.2,
+        "position": [
+          256,
+          -1232
+        ],
+        "id": "439ac3bf-cdd4-4839-8fd0-afcddd2ac922",
+        "name": "Merge Team Notification Search Success Context"
+      },
+      {
+        "parameters": {
+          "mode": "combine",
+          "combineBy": "combineByPosition",
+          "options": {}
+        },
+        "type": "n8n-nodes-base.merge",
+        "typeVersion": 3.2,
+        "position": [
+          256,
+          -1040
+        ],
+        "id": "8b6cc3f2-a775-4ba6-9d87-a431228fd913",
+        "name": "Merge Team Notification Search Error Context"
+      },
+      {
+        "parameters": {
+          "mode": "runOnceForEachItem",
+          "jsCode": "// Normalize Gmail reconciliation into one of four deterministic routes.\n\nconst input = $json ?? {};\n\nconst firstText = (...values) => {\n  for (const value of values) {\n    if (typeof value === 'string' && value.trim() !== '') {\n      return value.trim();\n    }\n  }\n\n  return null;\n};\n\nconst firstInteger = (...values) => {\n  for (const value of values) {\n    const parsed = Number.parseInt(String(value ?? ''), 10);\n\n    if (Number.isInteger(parsed)) {\n      return parsed;\n    }\n  }\n\n  return null;\n};\n\nconst buildFailure = (source) => {\n  const error = source.error ?? source;\n\n  const httpStatus = firstInteger(\n    error.httpCode,\n    error.statusCode,\n    error.status,\n    error.context?.httpStatusCode,\n    error.response?.status,\n    source.httpCode,\n    source.statusCode,\n  );\n\n  const providerCode = firstText(\n    error.code,\n    error.errorCode,\n    error.name,\n    error.context?.errorCode,\n  );\n\n  const message = firstText(\n    error.message,\n    error.description,\n    error.error,\n    error.context?.errorMessage,\n    source.message,\n  ) ?? 'Gmail reconciliation search failed.';\n\n  const retryAfter = firstInteger(\n    error.retryAfter,\n    error.retry_after,\n    error.response?.headers?.['retry-after'],\n    source.retryAfter,\n  );\n\n  const terminalStatus =\n    httpStatus !== null &&\n    [400, 401, 403, 404, 422].includes(httpStatus);\n\n  let errorClass = 'reconciliation_search_error';\n\n  if (httpStatus === 401) {\n    errorClass = 'authentication_error';\n  } else if (httpStatus === 403) {\n    errorClass = 'authorization_error';\n  } else if (httpStatus === 429) {\n    errorClass = 'rate_limit_error';\n  } else if (httpStatus !== null && httpStatus >= 500) {\n    errorClass = 'provider_unavailable';\n  } else if (\n    httpStatus !== null &&\n    [400, 404, 422].includes(httpStatus)\n  ) {\n    errorClass = 'provider_request_error';\n  }\n\n  const retryable = !terminalStatus;\n\n  return {\n    ...source,\n    team_notification_search_route:\n      retryable\n        ? 'finalize_retryable_failure'\n        : 'finalize_terminal_failure',\n    provider: 'gmail',\n    retryable,\n    error_class: errorClass,\n    error_code:\n      providerCode ?? 'gmail_reconciliation_search_failed',\n    error_message: message.slice(0, 1000),\n    http_status: httpStatus,\n    provider_retry_after_seconds: retryAfter,\n  };\n};\n\nif (Array.isArray(input.gmail_search_messages)) {\n  const messages = input.gmail_search_messages\n    .filter((message) => {\n      return (\n        message &&\n        typeof message.id === 'string' &&\n        message.id.trim() !== ''\n      );\n    })\n    .map((message) => ({\n      id: message.id.trim(),\n      thread_id:\n        typeof message.thread_id === 'string' &&\n        message.thread_id.trim() !== ''\n          ? message.thread_id.trim()\n          : null,\n      label_ids:\n        Array.isArray(message.label_ids)\n          ? message.label_ids.map(String)\n          : [],\n    }));\n\n  if (messages.length === 0) {\n    return {\n      json: {\n        ...input,\n        gmail_search_messages: messages,\n        gmail_search_match_count: 0,\n        team_notification_search_route:\n          'send_team_notification',\n        provider: 'gmail',\n      },\n    };\n  }\n\n  if (messages.length === 1) {\n    const message = messages[0];\n\n    return {\n      json: {\n        ...input,\n        gmail_search_messages: messages,\n        gmail_search_match_count: 1,\n        team_notification_search_route:\n          'finalize_success',\n        provider: 'gmail',\n        external_id: message.id,\n        reconciled: true,\n        provider_response_summary: {\n          marker_verified: true,\n          created: false,\n          thread_id: message.thread_id,\n          message_marker: input.notification_message_marker,\n        },\n      },\n    };\n  }\n\n  return {\n    json: {\n      ...input,\n      gmail_search_messages: messages,\n      gmail_search_match_count: messages.length,\n      team_notification_search_route:\n        'finalize_terminal_failure',\n      provider: 'gmail',\n      retryable: false,\n      error_class: 'reconciliation_ambiguity',\n      error_code: 'multiple_matching_team_notifications',\n      error_message:\n        `Gmail reconciliation found ${messages.length} sent messages with the same deterministic marker.`,\n      http_status: null,\n      provider_retry_after_seconds: null,\n    },\n  };\n}\n\nreturn {\n  json: buildFailure(input),\n};"
+        },
+        "type": "n8n-nodes-base.code",
+        "typeVersion": 2,
+        "position": [
+          480,
+          -1136
+        ],
+        "id": "7a13c990-a69f-4d61-a6b9-0a7e4cc9f854",
+        "name": "Normalize Team Notification Search Result"
+      },
+      {
+        "parameters": {
+          "rules": {
+            "values": [
+              {
+                "conditions": {
+                  "options": {
+                    "caseSensitive": true,
+                    "leftValue": "",
+                    "typeValidation": "strict",
+                    "version": 3
+                  },
+                  "conditions": [
+                    {
+                      "leftValue": "={{ $json.team_notification_search_route }}",
+                      "rightValue": "finalize_success",
+                      "operator": {
+                        "type": "string",
+                        "operation": "equals"
+                      },
+                      "id": "f4d340d5-9ed3-4a74-90ed-98fbdb040dbd"
+                    }
+                  ],
+                  "combinator": "and"
+                },
+                "renameOutput": true,
+                "outputKey": "finalize_success"
+              },
+              {
+                "conditions": {
+                  "options": {
+                    "caseSensitive": true,
+                    "leftValue": "",
+                    "typeValidation": "strict",
+                    "version": 3
+                  },
+                  "conditions": [
+                    {
+                      "id": "67b6c334-2332-44ad-9f93-ff510921a036",
+                      "leftValue": "={{ $json.team_notification_search_route }}",
+                      "rightValue": "send_team_notification",
+                      "operator": {
+                        "type": "string",
+                        "operation": "equals",
+                        "name": "filter.operator.equals"
+                      }
+                    }
+                  ],
+                  "combinator": "and"
+                },
+                "renameOutput": true,
+                "outputKey": "send_team_notification"
+              },
+              {
+                "conditions": {
+                  "options": {
+                    "caseSensitive": true,
+                    "leftValue": "",
+                    "typeValidation": "strict",
+                    "version": 3
+                  },
+                  "conditions": [
+                    {
+                      "id": "37bce58d-8667-46cd-af64-6b87f48063a7",
+                      "leftValue": "={{ $json.team_notification_search_route }}",
+                      "rightValue": "finalize_retryable_failure",
+                      "operator": {
+                        "type": "string",
+                        "operation": "equals",
+                        "name": "filter.operator.equals"
+                      }
+                    }
+                  ],
+                  "combinator": "and"
+                },
+                "renameOutput": true,
+                "outputKey": "finalize_retryable_failure"
+              },
+              {
+                "conditions": {
+                  "options": {
+                    "caseSensitive": true,
+                    "leftValue": "",
+                    "typeValidation": "strict",
+                    "version": 3
+                  },
+                  "conditions": [
+                    {
+                      "id": "c8988d66-6038-444a-9cbf-8a01d35a0814",
+                      "leftValue": "={{ $json.team_notification_search_route }}",
+                      "rightValue": "finalize_terminal_failure",
+                      "operator": {
+                        "type": "string",
+                        "operation": "equals",
+                        "name": "filter.operator.equals"
+                      }
+                    }
+                  ],
+                  "combinator": "and"
+                },
+                "renameOutput": true,
+                "outputKey": "finalize_terminal_failure"
+              }
+            ]
+          },
+          "options": {
+            "fallbackOutput": "extra"
+          }
+        },
+        "type": "n8n-nodes-base.switch",
+        "typeVersion": 3.4,
+        "position": [
+          672,
+          -1232
+        ],
+        "id": "e2645a0e-bee0-4060-a8eb-6d244b24e972",
+        "name": "Route Team Notification Search Result"
+      },
+      {
+        "parameters": {
+          "sendTo": "={{ $json.notification_send_to }}",
+          "subject": "={{ $json.notification_subject }}",
+          "message": "={{ $json.notification_html }}",
+          "options": {
+            "appendAttribution": false,
+            "senderName": "={{ $json.notification_sender_name }}"
+          }
+        },
+        "type": "n8n-nodes-base.gmail",
+        "typeVersion": 2.2,
+        "position": [
+          1296,
+          -1328
+        ],
+        "id": "2c5bf282-5516-40a0-86de-aa827452b33c",
+        "name": "Send Team Notification",
+        "webhookId": "469ef8ed-73d0-41c5-85f7-a620579ff4ba",
+        "credentials": {
+          "gmailOAuth2": {
+            "id": "LcK92xSDT34cJaIK",
+            "name": "Gmail account"
+          }
+        },
+        "onError": "continueErrorOutput"
+      },
+      {
+        "parameters": {
+          "mode": "combine",
+          "combineBy": "combineByPosition",
+          "options": {}
+        },
+        "type": "n8n-nodes-base.merge",
+        "typeVersion": 3.2,
+        "position": [
+          1536,
+          -1456
+        ],
+        "id": "604d1d0a-31df-4aa6-8efc-b05ccf498aac",
+        "name": "Merge Team Notification Delivery Success Context"
+      },
+      {
+        "parameters": {
+          "mode": "combine",
+          "combineBy": "combineByPosition",
+          "options": {}
+        },
+        "type": "n8n-nodes-base.merge",
+        "typeVersion": 3.2,
+        "position": [
+          1552,
+          -1216
+        ],
+        "id": "effd153b-6cb7-4fab-9998-e5a3e78f417d",
+        "name": "Merge Team Notification Delivery Error Context"
+      },
+      {
+        "parameters": {
+          "mode": "runOnceForEachItem",
+          "jsCode": "// Normalize Gmail delivery into common WF06 finalization fields.\n\nconst input = $json ?? {};\n\nconst firstText = (...values) => {\n  for (const value of values) {\n    if (typeof value === 'string' && value.trim() !== '') {\n      return value.trim();\n    }\n  }\n\n  return null;\n};\n\nconst firstInteger = (...values) => {\n  for (const value of values) {\n    const parsed = Number.parseInt(String(value ?? ''), 10);\n\n    if (Number.isInteger(parsed)) {\n      return parsed;\n    }\n  }\n\n  return null;\n};\n\nconst messageId = firstText(\n  input.id,\n  input.messageId,\n);\n\nif (!input.error && messageId) {\n  const threadId = firstText(\n    input.threadId,\n    input.thread_id,\n  );\n\n  return {\n    json: {\n      ...input,\n      team_notification_delivery_route:\n        'finalize_success',\n      provider: 'gmail',\n      external_id: messageId,\n      reconciled: false,\n      provider_response_summary: {\n        marker_verified: true,\n        created: true,\n        thread_id: threadId,\n        message_marker: input.notification_message_marker,\n      },\n    },\n  };\n}\n\nconst error = input.error ?? input;\n\nconst httpStatus = firstInteger(\n  error.httpCode,\n  error.statusCode,\n  error.status,\n  error.context?.httpStatusCode,\n  error.response?.status,\n  input.httpCode,\n  input.statusCode,\n);\n\nconst providerCode = firstText(\n  error.code,\n  error.errorCode,\n  error.name,\n  error.context?.errorCode,\n);\n\nconst message = firstText(\n  error.message,\n  error.description,\n  error.error,\n  error.context?.errorMessage,\n  input.message,\n) ?? 'Gmail delivery failed.';\n\nconst retryAfter = firstInteger(\n  error.retryAfter,\n  error.retry_after,\n  error.response?.headers?.['retry-after'],\n  input.retryAfter,\n);\n\nconst terminalStatus =\n  httpStatus !== null &&\n  [400, 401, 403, 404, 422].includes(httpStatus);\n\nlet errorClass = 'notification_delivery_error';\n\nif (httpStatus === 401) {\n  errorClass = 'authentication_error';\n} else if (httpStatus === 403) {\n  errorClass = 'authorization_error';\n} else if (httpStatus === 429) {\n  errorClass = 'rate_limit_error';\n} else if (httpStatus !== null && httpStatus >= 500) {\n  errorClass = 'provider_unavailable';\n} else if (\n  httpStatus !== null &&\n  [400, 404, 422].includes(httpStatus)\n) {\n  errorClass = 'provider_request_error';\n}\n\nconst retryable = !terminalStatus;\n\nreturn {\n  json: {\n    ...input,\n    team_notification_delivery_route:\n      retryable\n        ? 'finalize_retryable_failure'\n        : 'finalize_terminal_failure',\n    provider: 'gmail',\n    retryable,\n    error_class: errorClass,\n    error_code:\n      providerCode ?? 'gmail_notification_delivery_failed',\n    error_message: message.slice(0, 1000),\n    http_status: httpStatus,\n    provider_retry_after_seconds: retryAfter,\n  },\n};"
+        },
+        "type": "n8n-nodes-base.code",
+        "typeVersion": 2,
+        "position": [
+          1744,
+          -1344
+        ],
+        "id": "f5003b58-55e8-4b7b-840a-859a09cd7e9b",
+        "name": "Normalize Team Notification Delivery Result"
+      },
+      {
+        "parameters": {
+          "rules": {
+            "values": [
+              {
+                "conditions": {
+                  "options": {
+                    "caseSensitive": true,
+                    "leftValue": "",
+                    "typeValidation": "strict",
+                    "version": 3
+                  },
+                  "conditions": [
+                    {
+                      "leftValue": "={{ $json.team_notification_delivery_route }}",
+                      "rightValue": "finalize_success",
+                      "operator": {
+                        "type": "string",
+                        "operation": "equals"
+                      },
+                      "id": "7f6d4fc5-0bee-49fb-b260-4ae8a728c75b"
+                    }
+                  ],
+                  "combinator": "and"
+                },
+                "renameOutput": true,
+                "outputKey": "finalize_success"
+              },
+              {
+                "conditions": {
+                  "options": {
+                    "caseSensitive": true,
+                    "leftValue": "",
+                    "typeValidation": "strict",
+                    "version": 3
+                  },
+                  "conditions": [
+                    {
+                      "id": "0c73c5c6-668e-440b-8f30-6ba8fc77a690",
+                      "leftValue": "={{ $json.team_notification_delivery_route }}",
+                      "rightValue": "finalize_retryable_failure",
+                      "operator": {
+                        "type": "string",
+                        "operation": "equals",
+                        "name": "filter.operator.equals"
+                      }
+                    }
+                  ],
+                  "combinator": "and"
+                },
+                "renameOutput": true,
+                "outputKey": "finalize_retryable_failure"
+              },
+              {
+                "conditions": {
+                  "options": {
+                    "caseSensitive": true,
+                    "leftValue": "",
+                    "typeValidation": "strict",
+                    "version": 3
+                  },
+                  "conditions": [
+                    {
+                      "id": "935964b3-9456-4dc6-a9ea-3cb97c3eed98",
+                      "leftValue": "={{ $json.team_notification_delivery_route }}",
+                      "rightValue": "finalize_terminal_failure",
+                      "operator": {
+                        "type": "string",
+                        "operation": "equals",
+                        "name": "filter.operator.equals"
+                      }
+                    }
+                  ],
+                  "combinator": "and"
+                },
+                "renameOutput": true,
+                "outputKey": "finalize_terminal_failure"
+              }
+            ]
+          },
+          "options": {
+            "fallbackOutput": "extra"
+          }
+        },
+        "type": "n8n-nodes-base.switch",
+        "typeVersion": 3.4,
+        "position": [
+          1952,
+          -1344
+        ],
+        "id": "dc2887e4-39c2-49ab-b1e3-1da6c882fb2f",
+        "name": "Route Team Notification Delivery Result"
+      },
+      {
+        "parameters": {
+          "mode": "runOnceForEachItem",
+          "jsCode": "// Return a controlled WF06 result after a retryable operation failure.\n\nconst input = $json ?? {};\n\nif (\n  input.finalization_route !==\n  'return_retryable_failure'\n) {\n  throw new Error(\n    'Retryable failure result received an invalid finalization route',\n  );\n}\n\nif (\n  input.operation_status !==\n  'failed_retryable'\n) {\n  throw new Error(\n    'Retryable failure result requires operation_status=failed_retryable',\n  );\n}\n\nif (\n  input.case_state !==\n  'finalization_failed'\n) {\n  throw new Error(\n    'Retryable failure result requires case_state=finalization_failed',\n  );\n}\n\nif (!input.next_retry_at) {\n  throw new Error(\n    'Retryable failure result requires next_retry_at',\n  );\n}\n\nreturn {\n  json: {\n    workflow:\n      'WF06',\n\n    result:\n      'retry_scheduled',\n\n    case_id:\n      input.case_id ?? null,\n\n    correlation_id:\n      input.correlation_id ?? null,\n\n    case_state:\n      input.case_state,\n\n    operation_id:\n      input.operation_id ?? null,\n\n    operation_type:\n      input.operation_type ?? null,\n\n    operation_status:\n      input.operation_status,\n\n    step_status:\n      input.step_status ?? null,\n\n    finalization_outcome:\n      input.finalization_outcome ?? null,\n\n    next_retry_at:\n      input.next_retry_at,\n\n    requires_intervention:\n      false,\n  },\n};"
+        },
+        "type": "n8n-nodes-base.code",
+        "typeVersion": 2,
+        "position": [
+          3184,
+          -672
+        ],
+        "id": "67eb96fb-497c-4474-b892-eb52636072e3",
+        "name": "Return WF06 Retryable Failure Result"
+      },
+      {
+        "parameters": {
+          "mode": "runOnceForEachItem",
+          "jsCode": "// Return a controlled WF06 result when manual intervention is required.\n\nconst input = $json ?? {};\n\nconst preparationIntervention =\n  input.next_action ===\n    'operator_intervention_required' &&\n  input.preparation_outcome !== undefined;\n\nconst completionIntervention =\n  input.next_action ===\n    'operator_intervention_required' &&\n  input.completion_outcome !== undefined;\n\nconst finalizationIntervention =\n  input.finalization_route ===\n  'operator_intervention';\n\nif (\n  !preparationIntervention &&\n  !completionIntervention &&\n  !finalizationIntervention\n) {\n  throw new Error(\n    'Operator intervention result received an invalid WF06 route',\n  );\n}\n\nlet interventionReason =\n  input.error_code ?? null;\n\nif (\n  !interventionReason &&\n  input.operation_status === 'failed_terminal'\n) {\n  interventionReason =\n    'operation_failed_terminal';\n}\n\ninterventionReason ??=\n  input.completion_outcome ??\n  input.preparation_outcome ??\n  input.finalization_outcome ??\n  'unexpected_wf06_state';\n\nreturn {\n  json: {\n    workflow:\n      'WF06',\n\n    result:\n      'operator_intervention_required',\n\n    intervention_reason:\n      interventionReason,\n\n    case_id:\n      input.case_id ?? null,\n\n    correlation_id:\n      input.correlation_id ?? null,\n\n    case_state:\n      input.case_state ?? null,\n\n    operation_id:\n      input.operation_id ?? null,\n\n    operation_type:\n      input.operation_type ?? null,\n\n    operation_status:\n      input.operation_status ?? null,\n\n    step_status:\n      input.step_status ?? null,\n\n    preparation_outcome:\n      input.preparation_outcome ?? null,\n\n    completion_outcome:\n      input.completion_outcome ?? null,\n\n    finalization_outcome:\n      input.finalization_outcome ?? null,\n\n    next_retry_at:\n      input.next_retry_at ?? null,\n\n    requires_intervention:\n      true,\n  },\n};"
+        },
+        "type": "n8n-nodes-base.code",
+        "typeVersion": 2,
+        "position": [
+          3184,
+          -464
+        ],
+        "id": "8554af86-c52d-41dd-9847-7b4bc041725e",
+        "name": "Return WF06 Operator Intervention Result"
+      },
+      {
+        "parameters": {
+          "mode": "runOnceForEachItem",
+          "jsCode": "// Fail the WF06 execution when a Switch node cannot determine a valid route.\n\nconst input = $json ?? {};\n\nconst routeSnapshot = {\n  next_action:\n    input.next_action ?? null,\n\n  operation_type:\n    input.operation_type ?? null,\n\n  finalization_route:\n    input.finalization_route ?? null,\n\n  calendar_search_route:\n    input.calendar_search_route ?? null,\n\n  team_notification_search_route:\n    input.team_notification_search_route ?? null,\n\n  team_notification_delivery_route:\n    input.team_notification_delivery_route ?? null,\n\n  case_id:\n    input.case_id ?? null,\n\n  correlation_id:\n    input.correlation_id ?? null,\n\n  operation_id:\n    input.operation_id ?? null,\n};\n\nthrow new Error(\n  `WF06 reached an unexpected routing fallback: ${JSON.stringify(routeSnapshot)}`,\n);"
+        },
+        "type": "n8n-nodes-base.code",
+        "typeVersion": 2,
+        "position": [
+          3216,
+          -272
+        ],
+        "id": "c9c0152b-6590-41bb-a127-dc0828a94e1e",
+        "name": "Throw Unexpected WF06 Route"
+      }
+    ],
+    "connections": {
+      "Webhook": {
+        "main": [
+          [
+            {
+              "node": "Normalize Invocation Envelope",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Internal Invocation Trigger": {
+        "main": [
+          [
+            {
+              "node": "Normalize Invocation Envelope",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Normalize Invocation Envelope": {
+        "main": [
+          [
+            {
+              "node": "Validate WF06 Invocation",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Validate WF06 Invocation": {
+        "main": [
+          [
+            {
+              "node": "Prepare WF06 Request Context",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Prepare WF06 Request Context": {
+        "main": [
+          [
+            {
+              "node": "Prepare Finalization Operation",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Prepare Finalization Operation": {
+        "main": [
+          [
+            {
+              "node": "Normalize Finalization Preparation",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Normalize Finalization Preparation": {
+        "main": [
+          [
+            {
+              "node": "Route Finalization Preparation",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Route Finalization Preparation": {
+        "main": [
+          [
+            {
+              "node": "Route Finalization Operation",
+              "type": "main",
+              "index": 0
+            }
+          ],
+          [
+            {
+              "node": "Complete Onboarding",
+              "type": "main",
+              "index": 0
+            }
+          ],
+          [
+            {
+              "node": "Return Finalization No Action Result",
+              "type": "main",
+              "index": 0
+            }
+          ],
+          [
+            {
+              "node": "Return WF06 Operator Intervention Result",
+              "type": "main",
+              "index": 0
+            }
+          ],
+          [
+            {
+              "node": "Throw Unexpected WF06 Route",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Complete Onboarding": {
+        "main": [
+          [
+            {
+              "node": "Normalize Onboarding Completion",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Normalize Onboarding Completion": {
+        "main": [
+          [
+            {
+              "node": "Route Onboarding Completion",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Route Onboarding Completion": {
+        "main": [
+          [
+            {
+              "node": "Return Finalization Completed Result",
+              "type": "main",
+              "index": 0
+            }
+          ],
+          [
+            {
+              "node": "Return WF06 Operator Intervention Result",
+              "type": "main",
+              "index": 0
+            }
+          ],
+          [
+            {
+              "node": "Throw Unexpected WF06 Route",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Route Finalization Operation": {
+        "main": [
+          [
+            {
+              "node": "Build Drive Reconciliation Request",
+              "type": "main",
+              "index": 0
+            }
+          ],
+          [
+            {
+              "node": "Build Calendar Reconciliation Request",
+              "type": "main",
+              "index": 0
+            }
+          ],
+          [
+            {
+              "node": "Build Team Notification Request",
+              "type": "main",
+              "index": 0
+            }
+          ],
+          [
+            {
+              "node": "Throw Unexpected WF06 Route",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Build Drive Reconciliation Request": {
+        "main": [
+          [
+            {
+              "node": "Search Drive Folder",
+              "type": "main",
+              "index": 0
+            },
+            {
+              "node": "Merge Drive Search Success Context",
+              "type": "main",
+              "index": 0
+            },
+            {
+              "node": "Merge Drive Search Error Context",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Search Drive Folder": {
+        "main": [
+          [
+            {
+              "node": "Merge Drive Search Success Context",
+              "type": "main",
+              "index": 1
+            }
+          ],
+          [
+            {
+              "node": "Merge Drive Search Error Context",
+              "type": "main",
+              "index": 1
+            }
+          ]
+        ]
+      },
+      "Merge Drive Search Success Context": {
+        "main": [
+          [
+            {
+              "node": "Normalize Drive Search Result",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Merge Drive Search Error Context": {
+        "main": [
+          [
+            {
+              "node": "Normalize Drive Search Result",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Normalize Drive Search Result": {
+        "main": [
+          [
+            {
+              "node": "Route Drive Search Result",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Route Drive Search Result": {
+        "main": [
+          [
+            {
+              "node": "Create Drive Folder",
+              "type": "main",
+              "index": 0
+            },
+            {
+              "node": "Merge Drive Creation Success Context",
+              "type": "main",
+              "index": 0
+            },
+            {
+              "node": "Merge Drive Creation Error Context",
+              "type": "main",
+              "index": 0
+            }
+          ],
+          [
+            {
+              "node": "Finalize WF06 Operation Success",
+              "type": "main",
+              "index": 0
+            }
+          ],
+          [
+            {
+              "node": "Finalize WF06 Operation Failure",
+              "type": "main",
+              "index": 0
+            }
+          ],
+          [
+            {
+              "node": "Finalize WF06 Operation Failure",
+              "type": "main",
+              "index": 0
+            }
+          ],
+          [
+            {
+              "node": "Throw Unexpected WF06 Route",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Create Drive Folder": {
+        "main": [
+          [
+            {
+              "node": "Merge Drive Creation Success Context",
+              "type": "main",
+              "index": 1
+            }
+          ],
+          [
+            {
+              "node": "Merge Drive Creation Error Context",
+              "type": "main",
+              "index": 1
+            }
+          ]
+        ]
+      },
+      "Merge Drive Creation Success Context": {
+        "main": [
+          [
+            {
+              "node": "Normalize Drive Creation Result",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Merge Drive Creation Error Context": {
+        "main": [
+          [
+            {
+              "node": "Normalize Drive Creation Result",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Normalize Drive Creation Result": {
+        "main": [
+          [
+            {
+              "node": "Route Drive Creation Result",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Route Drive Creation Result": {
+        "main": [
+          [
+            {
+              "node": "Finalize WF06 Operation Success",
+              "type": "main",
+              "index": 0
+            }
+          ],
+          [
+            {
+              "node": "Finalize WF06 Operation Failure",
+              "type": "main",
+              "index": 0
+            }
+          ],
+          [
+            {
+              "node": "Finalize WF06 Operation Failure",
+              "type": "main",
+              "index": 0
+            }
+          ],
+          [
+            {
+              "node": "Throw Unexpected WF06 Route",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Finalize WF06 Operation Success": {
+        "main": [
+          [
+            {
+              "node": "Normalize WF06 Operation Finalization",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Finalize WF06 Operation Failure": {
+        "main": [
+          [
+            {
+              "node": "Normalize WF06 Operation Finalization",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Normalize WF06 Operation Finalization": {
+        "main": [
+          [
+            {
+              "node": "Route WF06 Operation Finalization",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Route WF06 Operation Finalization": {
+        "main": [
+          [
+            {
+              "node": "Prepare Finalization Operation",
+              "type": "main",
+              "index": 0
+            }
+          ],
+          [
+            {
+              "node": "Return WF06 Retryable Failure Result",
+              "type": "main",
+              "index": 0
+            }
+          ],
+          [
+            {
+              "node": "Return WF06 Operator Intervention Result",
+              "type": "main",
+              "index": 0
+            }
+          ],
+          [
+            {
+              "node": "Throw Unexpected WF06 Route",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Build Calendar Reconciliation Request": {
+        "main": [
+          [
+            {
+              "node": "Search Calendar Event",
+              "type": "main",
+              "index": 0
+            },
+            {
+              "node": "Merge Calendar Search Success Context",
+              "type": "main",
+              "index": 0
+            },
+            {
+              "node": "Merge Calendar Search Error Context",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Merge Calendar Search Success Context": {
+        "main": [
+          [
+            {
+              "node": "Normalize Calendar Search Result",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Search Calendar Event": {
+        "main": [
+          [
+            {
+              "node": "Merge Calendar Search Success Context",
+              "type": "main",
+              "index": 1
+            }
+          ],
+          [
+            {
+              "node": "Merge Calendar Search Error Context",
+              "type": "main",
+              "index": 1
+            }
+          ]
+        ]
+      },
+      "Merge Calendar Search Error Context": {
+        "main": [
+          [
+            {
+              "node": "Normalize Calendar Search Result",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Normalize Calendar Search Result": {
+        "main": [
+          [
+            {
+              "node": "Route Calendar Search Result",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Route Calendar Search Result": {
+        "main": [
+          [
+            {
+              "node": "Create Calendar Event",
+              "type": "main",
+              "index": 0
+            },
+            {
+              "node": "Merge Calendar Creation Success Context",
+              "type": "main",
+              "index": 0
+            },
+            {
+              "node": "Merge Calendar Creation Error Context",
+              "type": "main",
+              "index": 0
+            }
+          ],
+          [
+            {
+              "node": "Finalize WF06 Operation Success",
+              "type": "main",
+              "index": 0
+            }
+          ],
+          [
+            {
+              "node": "Finalize WF06 Operation Failure",
+              "type": "main",
+              "index": 0
+            }
+          ],
+          [
+            {
+              "node": "Finalize WF06 Operation Failure",
+              "type": "main",
+              "index": 0
+            }
+          ],
+          [
+            {
+              "node": "Throw Unexpected WF06 Route",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Create Calendar Event": {
+        "main": [
+          [
+            {
+              "node": "Merge Calendar Creation Success Context",
+              "type": "main",
+              "index": 1
+            }
+          ],
+          [
+            {
+              "node": "Merge Calendar Creation Error Context",
+              "type": "main",
+              "index": 1
+            }
+          ]
+        ]
+      },
+      "Merge Calendar Creation Success Context": {
+        "main": [
+          [
+            {
+              "node": "Normalize Calendar Creation Result",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Merge Calendar Creation Error Context": {
+        "main": [
+          [
+            {
+              "node": "Normalize Calendar Creation Result",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Normalize Calendar Creation Result": {
+        "main": [
+          [
+            {
+              "node": "Route Calendar Creation Result",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Route Calendar Creation Result": {
+        "main": [
+          [
+            {
+              "node": "Finalize WF06 Operation Success",
+              "type": "main",
+              "index": 0
+            }
+          ],
+          [
+            {
+              "node": "Finalize WF06 Operation Failure",
+              "type": "main",
+              "index": 0
+            }
+          ],
+          [
+            {
+              "node": "Finalize WF06 Operation Failure",
+              "type": "main",
+              "index": 0
+            }
+          ],
+          [
+            {
+              "node": "Throw Unexpected WF06 Route",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Build Team Notification Request": {
+        "main": [
+          [
+            {
+              "node": "Search Existing Team Notification",
+              "type": "main",
+              "index": 0
+            },
+            {
+              "node": "Merge Team Notification Search Success Context",
+              "type": "main",
+              "index": 0
+            },
+            {
+              "node": "Merge Team Notification Search Error Context",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Search Existing Team Notification": {
+        "main": [
+          [
+            {
+              "node": "Aggregate Team Notification Search Results",
+              "type": "main",
+              "index": 0
+            }
+          ],
+          [
+            {
+              "node": "Merge Team Notification Search Error Context",
+              "type": "main",
+              "index": 1
+            }
+          ]
+        ]
+      },
+      "Aggregate Team Notification Search Results": {
+        "main": [
+          [
+            {
+              "node": "Merge Team Notification Search Success Context",
+              "type": "main",
+              "index": 1
+            }
+          ]
+        ]
+      },
+      "Merge Team Notification Search Success Context": {
+        "main": [
+          [
+            {
+              "node": "Normalize Team Notification Search Result",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Normalize Team Notification Search Result": {
+        "main": [
+          [
+            {
+              "node": "Route Team Notification Search Result",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Route Team Notification Search Result": {
+        "main": [
+          [
+            {
+              "node": "Finalize WF06 Operation Success",
+              "type": "main",
+              "index": 0
+            }
+          ],
+          [
+            {
+              "node": "Send Team Notification",
+              "type": "main",
+              "index": 0
+            },
+            {
+              "node": "Merge Team Notification Delivery Success Context",
+              "type": "main",
+              "index": 0
+            },
+            {
+              "node": "Merge Team Notification Delivery Error Context",
+              "type": "main",
+              "index": 0
+            }
+          ],
+          [
+            {
+              "node": "Finalize WF06 Operation Failure",
+              "type": "main",
+              "index": 0
+            }
+          ],
+          [
+            {
+              "node": "Finalize WF06 Operation Failure",
+              "type": "main",
+              "index": 0
+            }
+          ],
+          [
+            {
+              "node": "Throw Unexpected WF06 Route",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Send Team Notification": {
+        "main": [
+          [
+            {
+              "node": "Merge Team Notification Delivery Success Context",
+              "type": "main",
+              "index": 1
+            }
+          ],
+          [
+            {
+              "node": "Merge Team Notification Delivery Error Context",
+              "type": "main",
+              "index": 1
+            }
+          ]
+        ]
+      },
+      "Merge Team Notification Delivery Success Context": {
+        "main": [
+          [
+            {
+              "node": "Normalize Team Notification Delivery Result",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Merge Team Notification Delivery Error Context": {
+        "main": [
+          [
+            {
+              "node": "Normalize Team Notification Delivery Result",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Normalize Team Notification Delivery Result": {
+        "main": [
+          [
+            {
+              "node": "Route Team Notification Delivery Result",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Route Team Notification Delivery Result": {
+        "main": [
+          [
+            {
+              "node": "Finalize WF06 Operation Success",
+              "type": "main",
+              "index": 0
+            }
+          ],
+          [
+            {
+              "node": "Finalize WF06 Operation Failure",
+              "type": "main",
+              "index": 0
+            }
+          ],
+          [
+            {
+              "node": "Finalize WF06 Operation Failure",
+              "type": "main",
+              "index": 0
+            }
+          ],
+          [
+            {
+              "node": "Throw Unexpected WF06 Route",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Merge Team Notification Search Error Context": {
+        "main": [
+          [
+            {
+              "node": "Normalize Team Notification Search Result",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Return WF06 Retryable Failure Result": {
+        "main": [
+          []
+        ]
+      }
+    },
+    "settings": {
+      "executionOrder": "v1",
+      "binaryMode": "separate",
+      "availableInMCP": false,
+      "timeSavedMode": "fixed",
+      "errorWorkflow": "WykBM7mvCOqph91a",
+      "callerPolicy": "workflowsFromSameOwner"
+    },
+    "staticData": null,
+    "meta": {
+      "templateCredsSetupCompleted": true
+    },
+    "nodeGroups": [],
+    "pinData": {},
+    "versionId": "33b064cf-eeba-4493-8354-e060521ffb46",
+    "activeVersionId": "33b064cf-eeba-4493-8354-e060521ffb46",
+    "versionCounter": 538,
+    "triggerCount": 1,
+    "sourceWorkflowId": null,
+    "tags": [],
+    "shared": [
+      {
+        "updatedAt": "2026-07-19T17:58:11.984Z",
+        "createdAt": "2026-07-19T17:58:11.984Z",
+        "role": "workflow:owner",
+        "workflowId": "Rq9cHpFYeS8tqYPf",
+        "projectId": "zmxxmv9P8lYEvh92",
+        "project": {
+          "updatedAt": "2026-07-29T20:13:12.237Z",
+          "createdAt": "2026-07-18T09:24:05.682Z",
+          "id": "zmxxmv9P8lYEvh92",
+          "name": "Vitalii pokhylvitalii@gmail.com <pokhylvitalii.it@gmail.com>",
+          "type": "personal",
+          "icon": null,
+          "description": null,
+          "customTelemetryTags": [],
+          "creatorId": "9bff2e70-7eea-4940-a9da-d5dfd1c2d055"
+        }
+      }
+    ],
+    "versionMetadata": {
+      "name": "Version 33b064cf",
+      "description": ""
+    }
+  }
+]
