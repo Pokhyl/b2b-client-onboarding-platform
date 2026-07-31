@@ -601,6 +601,14 @@ BEGIN
             ),
             ''
         ) IS NULL
+        OR v_notification_prepare
+            -> 'request_summary'
+            ->> 'onboarding_case_id'
+            IS DISTINCT FROM v_case_id::text
+        OR v_notification_prepare
+            -> 'request_summary'
+            ->> 'operation_key_hash'
+            !~ '^[0-9a-f]{32}$'
     THEN
         RAISE EXCEPTION
             'Unexpected WF06 notification preparation: %',

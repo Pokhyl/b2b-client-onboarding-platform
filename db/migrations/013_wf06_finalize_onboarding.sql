@@ -962,17 +962,18 @@ BEGIN
             );
         END IF;
 
-        IF (
-            v_current_operation.request_summary
-                ->> 'onboarding_case_id'
-                IS DISTINCT FROM v_case.id::text
-            OR v_current_operation.request_summary
-                ->> 'operation_key_hash'
-                IS NULL
-            OR v_current_operation.request_summary
-                ->> 'operation_key_hash'
-                !~ '^[0-9a-f]{32}$'
-        )
+        IF v_operation_type <> 'notify_team'
+            AND (
+                v_current_operation.request_summary
+                    ->> 'onboarding_case_id'
+                    IS DISTINCT FROM v_case.id::text
+                OR v_current_operation.request_summary
+                    ->> 'operation_key_hash'
+                    IS NULL
+                OR v_current_operation.request_summary
+                    ->> 'operation_key_hash'
+                    !~ '^[0-9a-f]{32}$'
+            )
         THEN
             RETURN jsonb_build_object(
                 'preparation_outcome',
@@ -1130,6 +1131,25 @@ BEGIN
                     ),
                     ''
                 ) IS NULL
+                OR v_current_operation
+                    .request_summary
+                    ->> 'message_marker'
+                    IS DISTINCT FROM
+                    'b2b-team-notification-' ||
+                    substr(
+                        encode(
+                            digest(
+                                convert_to(
+                                    v_idempotency_key,
+                                    'UTF8'
+                                ),
+                                'sha256'
+                            ),
+                            'hex'
+                        ),
+                        1,
+                        24
+                    )
                 OR v_current_operation
                     .request_summary
                     ->> 'drive_folder_id'
@@ -1584,6 +1604,10 @@ BEGIN
                         btrim(v_client.legal_name),
                         'external_client_id',
                         v_case.external_client_id,
+                        'onboarding_case_id',
+                        v_case.id::text,
+                        'operation_key_hash',
+                        v_operation_key_hash,
                         'drive_folder_id',
                         v_drive_folder_id,
                         'drive_folder_link',
