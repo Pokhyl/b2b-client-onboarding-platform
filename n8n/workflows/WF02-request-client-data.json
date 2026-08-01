@@ -2447,12 +2447,11 @@
     },
     {
       "parameters": {
-        "mode": "combine",
-        "combineBy": "combineByPosition",
-        "options": {}
+        "mode": "runOnceForEachItem",
+        "jsCode": "const context = $(\"Prepare Client Data Email\").item.json ?? {}; const errorItem = $json ?? {}; return { json: { ...context, ...errorItem } };"
       },
-      "type": "n8n-nodes-base.merge",
-      "typeVersion": 3.2,
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
       "position": [
         0,
         192
@@ -4303,11 +4302,6 @@
             "node": "Merge Gmail Success Context",
             "type": "main",
             "index": 0
-          },
-          {
-            "node": "Merge Gmail Failure Context",
-            "type": "main",
-            "index": 0
           }
         ]
       ]
@@ -4325,7 +4319,7 @@
           {
             "node": "Merge Gmail Failure Context",
             "type": "main",
-            "index": 1
+            "index": 0
           }
         ]
       ]

@@ -55,7 +55,9 @@ WF01 is started by an n8n Webhook trigger with the following contract:
 
 The production webhook URL is the integration endpoint used by the controlled Mock CRM. The temporary n8n test webhook URL is not part of the external contract.
 
-WF01 must parse the raw request body only after webhook authentication succeeds. This allows malformed JSON and contract-validation failures to use controlled HTTP responses without performing business database writes.
+The n8n Webhook trigger authenticates the request before WF01 performs any business database operation. For a syntactically valid JSON body, WF01 then applies its own content-type and payload validation.
+
+Malformed JSON is rejected by the n8n webhook request parser before the first WF01 node executes. The confirmed local runtime response is HTTP `422`; this platform-level response is not produced by a `Respond to Webhook` node. No business database write occurs.
 
 ### 4.2 Shared-secret authentication
 
@@ -82,9 +84,9 @@ Outside a local development environment, the webhook must be called through HTTP
 
 Authentication must be completed before payload validation and before any business database operation.
 
-When the authentication header is missing or invalid:
+When the authentication header is missing or invalid, the built-in n8n Header Auth handler applies the following confirmed behavior:
 
-- the request must be rejected with HTTP `401 Unauthorized`;
+- the request is rejected with HTTP `403 Forbidden` before the first WF01 node executes;
 - no row may be inserted or updated in `onboarding_cases`;
 - no row may be inserted in `onboarding_events`;
 - WF02 must not be invoked;
@@ -545,7 +547,9 @@ WF01 must pass only this internal payload to WF02:
 
 The values must be taken from the persisted onboarding case.
 
-WF01 must invoke WF02 as an asynchronous n8n sub-workflow execution with `Wait for Sub-Workflow Completion` disabled.
+WF01 must invoke the real `WF02 - Request Client Data - Implementation Complete` workflow through an n8n `Execute Workflow` node. `Wait for Sub-Workflow Completion` must be enabled in the queue-mode runtime so that the worker retains the integrated execution context and the caller receives a deterministic success or error output.
+
+The dispatch node must use `Continue (using error output)` and must keep `Always Output Data` disabled. A WF02 invocation error therefore reaches only the explicit error output.
 
 The value:
 
@@ -553,9 +557,9 @@ The value:
 wf02_dispatch: invoked
 ```
 
-means that n8n accepted creation or queueing of the WF02 sub-execution. It does not mean that WF02 completed or that the client-data email was delivered.
+means that n8n accepted and completed the integrated WF02 invocation without throwing an error to WF01. PostgreSQL remains authoritative for the client-data delivery state.
 
-WF01 must not wait for WF02 to change the onboarding case state. The `case_state` returned by WF01 is the state selected from PostgreSQL after the intake transaction committed and before WF02 processing.
+The `case_state` returned by WF01 is still the state selected from PostgreSQL by `process_wf01_intake` immediately after the intake transaction committed. It is not refreshed from a later WF02 state transition before the HTTP response is built.
 
 WF01 must not pass these values to WF02:
 
@@ -861,7 +865,7 @@ A successful response must use this structure:
 
 All identifiers and state values in the response must come from the authoritative PostgreSQL result.
 
-`case_state` is the state selected by the committed intake transaction before asynchronous WF02 processing. A later state change performed by WF02 is outside the WF01 HTTP response.
+`case_state` is the state selected by the committed intake transaction before WF02 processing. A later state change performed by WF02 is not substituted into the WF01 response.
 
 ### 12.2 New case response
 
@@ -933,9 +937,19 @@ Example body:
 
 No onboarding business record may be created or updated.
 
-### 13.2 Invalid JSON or payload
+### 13.2 Malformed JSON
 
-Malformed JSON or a request that violates the input contract must return:
+Syntactically malformed JSON with `Content-Type: application/json` is rejected by n8n before WF01 starts. The confirmed platform response is:
+
+```text
+HTTP 422 Unprocessable Entity
+```
+
+The n8n response identifies a request-body parsing failure. WF01 does not normalize or persist that platform response, and no business database write occurs.
+
+### 13.3 Invalid payload
+
+A syntactically valid JSON request that violates the input contract must return:
 
 ```text
 HTTP 400 Bad Request
@@ -962,17 +976,17 @@ Validation errors must not echo submitted field values.
 
 No onboarding business record may be created or updated.
 
-### 13.3 Authentication failure
+### 13.4 Authentication failure
 
 Authentication failure behavior is defined in section 4.3 and must return:
 
 ```text
-HTTP 401 Unauthorized
+HTTP 403 Forbidden
 ```
 
 The response must not reveal whether the remaining payload would otherwise be valid.
 
-### 13.4 Source-identity conflict
+### 13.5 Source-identity conflict
 
 When the same source event identifier is received with a different source deal identifier, WF01 must return:
 
@@ -991,7 +1005,7 @@ Example body:
 
 The response must not expose the identifiers or data of the existing conflicting case.
 
-### 13.5 Technical failure
+### 13.6 Technical failure
 
 An unexpected database, n8n, or internal processing failure must return:
 
@@ -1152,7 +1166,7 @@ The implementation of WF01 must preserve this logical order:
 7. Execute PostgreSQL intake transaction
 8. Resolve authoritative case and final intake result
 9. Evaluate WF02 dispatch condition from PostgreSQL
-10. Queue WF02 asynchronously when required
+10. Invoke WF02 through the integrated sub-workflow boundary when required
 11. Return sanitized HTTP response
 ```
 
@@ -1211,20 +1225,29 @@ Given an existing source event identifier with another deal identifier:
 
 Given a missing or invalid authentication header:
 
-- HTTP response is `401`;
+- n8n returns HTTP `403` before WF01 executes;
 - no business database write occurs;
 - WF02 is not invoked.
 
-### 18.6 Invalid payload
+### 18.6 Malformed JSON
 
-Given malformed JSON or an invalid required field:
+Given syntactically malformed JSON with `Content-Type: application/json`:
+
+- n8n returns HTTP `422` before WF01 executes;
+- no onboarding case is created or updated;
+- no business event is inserted;
+- WF02 is not invoked.
+
+### 18.7 Invalid payload
+
+Given syntactically valid JSON with an invalid required field:
 
 - HTTP response is `400`;
 - no onboarding case is created or updated;
 - no business event is inserted;
 - WF02 is not invoked.
 
-### 18.7 Concurrent duplicate event
+### 18.8 Concurrent duplicate event
 
 Given two concurrent executions for the same new event:
 
@@ -1235,7 +1258,7 @@ Given two concurrent executions for the same new event:
 - one response uses `created`;
 - the other response uses `duplicate_event`.
 
-### 18.8 Concurrent events for one deal
+### 18.9 Concurrent events for one deal
 
 Given two concurrent events with different event identifiers for one new deal:
 
@@ -1246,7 +1269,7 @@ Given two concurrent events with different event identifiers for one new deal:
 - one response uses `created`;
 - the other response uses `existing_deal`.
 
-### 18.9 Existing case past `created`
+### 18.10 Existing case past `created`
 
 Given a duplicate request for a case whose state is not `created`:
 
@@ -1254,7 +1277,7 @@ Given a duplicate request for a case whose state is not `created`:
 - no state change occurs;
 - WF02 is not invoked.
 
-### 18.10 Successful request operation already exists
+### 18.11 Successful request operation already exists
 
 Given a case in state `created` with a successful `send_client_data_request` operation:
 
@@ -1262,7 +1285,7 @@ Given a case in state `created` with a successful `send_client_data_request` ope
 - WF02 is not invoked;
 - no new external operation is created by WF01.
 
-### 18.11 Intake transaction failure
+### 18.12 Intake transaction failure
 
 Given a PostgreSQL failure before commit:
 
@@ -1271,7 +1294,7 @@ Given a PostgreSQL failure before commit:
 - WF02 is not invoked;
 - the technical failure is routed to WF99.
 
-### 18.12 WF02 dispatch acceptance failure after commit
+### 18.13 WF02 dispatch acceptance failure after commit
 
 Given a successfully committed case when n8n cannot create or queue the required WF02 sub-execution:
 
@@ -1280,7 +1303,7 @@ Given a successfully committed case when n8n cannot create or queue the required
 - the failure is routed to WF99;
 - a later duplicate webhook can safely retry the dispatch path.
 
-### 18.13 Responsibility boundary
+### 18.14 Responsibility boundary
 
 For every WF01 scenario:
 

@@ -1,0 +1,562 @@
+[
+  {
+    "updatedAt": "2026-08-01T12:03:47.183Z",
+    "createdAt": "2026-07-31T21:04:38.032Z",
+    "id": "g4XEAiAzhu1fz5wn",
+    "name": "WF01 - Intake Deal Won",
+    "description": null,
+    "active": false,
+    "isArchived": false,
+    "nodes": [
+      {
+        "parameters": {
+          "httpMethod": "POST",
+          "path": "b2b-onboarding/deal-won",
+          "authentication": "headerAuth",
+          "responseMode": "responseNode",
+          "options": {
+            "rawBody": true
+          }
+        },
+        "type": "n8n-nodes-base.webhook",
+        "typeVersion": 2.1,
+        "position": [
+          -576,
+          -48
+        ],
+        "id": "617e5331-27e8-40fc-a00c-62c780fa574a",
+        "name": "Deal Won Webhook",
+        "webhookId": "d9ca8caf-dbdc-4af8-b8a6-c47585cefac8",
+        "credentials": {
+          "httpHeaderAuth": {
+            "id": "fcLNu8KC71h21Gr6",
+            "name": "WF01 Mock CRM Header Auth"
+          }
+        }
+      },
+      {
+        "parameters": {
+          "jsCode": "const request = $input.first().json;\n\nconst headers = request.headers ?? {};\nconst rawContentType = String(\n  headers['content-type'] ??\n  headers['Content-Type'] ??\n  ''\n);\n\nconst contentType = rawContentType\n  .split(';')[0]\n  .trim()\n  .toLowerCase();\n\nconst errors = [];\n\nconst isObject = (value) =>\n  value !== null &&\n  typeof value === 'object' &&\n  !Array.isArray(value);\n\nconst has = (object, key) =>\n  Object.prototype.hasOwnProperty.call(object, key);\n\nconst addError = (field, code) => {\n  errors.push({ field, code });\n};\n\nconst requiredString = (object, key, field) => {\n  if (!has(object, key) || object[key] === null) {\n    addError(field, 'required');\n    return null;\n  }\n\n  if (typeof object[key] !== 'string') {\n    addError(field, 'invalid_type');\n    return null;\n  }\n\n  const value = object[key].trim();\n\n  if (value === '') {\n    addError(field, 'required');\n    return null;\n  }\n\n  return value;\n};\n\nconst optionalString = (object, key, field) => {\n  if (!has(object, key) || object[key] === null) {\n    return null;\n  }\n\n  if (typeof object[key] !== 'string') {\n    addError(field, 'invalid_type');\n    return null;\n  }\n\n  const value = object[key].trim();\n\n  return value === '' ? null : value;\n};\n\n// Reject requests that are not JSON.\nif (contentType !== 'application/json') {\n  return [\n    {\n      json: {\n        validation_ok: false,\n        http_status: 415,\n        response_body: {\n          status: 'rejected',\n          error_code: 'unsupported_media_type',\n        },\n      },\n    },\n  ];\n}\n\nconst body = request.body;\n\n// Body must be exactly one JSON object.\nif (!isObject(body)) {\n  return [\n    {\n      json: {\n        validation_ok: false,\n        http_status: 400,\n        response_body: {\n          status: 'rejected',\n          error_code: 'invalid_payload',\n          errors: [\n            {\n              field: 'body',\n              code: 'invalid_type',\n            },\n          ],\n        },\n      },\n    },\n  ];\n}\n\n// Reject unknown top-level fields.\nconst allowedTopLevelFields = new Set([\n  'event_type',\n  'event_id',\n  'deal_id',\n  'company',\n  'contact',\n  'metadata',\n]);\n\nfor (const key of Object.keys(body)) {\n  if (!allowedTopLevelFields.has(key)) {\n    addError(key, 'unsupported_field');\n  }\n}\n\nconst eventType = requiredString(\n  body,\n  'event_type',\n  'event_type',\n);\n\nconst eventId = requiredString(\n  body,\n  'event_id',\n  'event_id',\n);\n\nconst dealId = requiredString(\n  body,\n  'deal_id',\n  'deal_id',\n);\n\nif (eventType !== null && eventType !== 'deal.won') {\n  addError('event_type', 'invalid_value');\n}\n\n// Validate company.\nlet companyName = null;\n\nif (!has(body, 'company')) {\n  addError('company', 'required');\n} else if (!isObject(body.company)) {\n  addError('company', 'invalid_type');\n} else {\n  const allowedCompanyFields = new Set(['name']);\n\n  for (const key of Object.keys(body.company)) {\n    if (!allowedCompanyFields.has(key)) {\n      addError(`company.${key}`, 'unsupported_field');\n    }\n  }\n\n  companyName = requiredString(\n    body.company,\n    'name',\n    'company.name',\n  );\n}\n\n// Validate contact.\nlet contactFirstName = null;\nlet contactLastName = null;\nlet contactEmail = null;\nlet contactPhone = null;\n\nif (!has(body, 'contact')) {\n  addError('contact', 'required');\n} else if (!isObject(body.contact)) {\n  addError('contact', 'invalid_type');\n} else {\n  const allowedContactFields = new Set([\n    'first_name',\n    'last_name',\n    'email',\n    'phone',\n  ]);\n\n  for (const key of Object.keys(body.contact)) {\n    if (!allowedContactFields.has(key)) {\n      addError(`contact.${key}`, 'unsupported_field');\n    }\n  }\n\n  contactFirstName = optionalString(\n    body.contact,\n    'first_name',\n    'contact.first_name',\n  );\n\n  contactLastName = optionalString(\n    body.contact,\n    'last_name',\n    'contact.last_name',\n  );\n\n  contactEmail = requiredString(\n    body.contact,\n    'email',\n    'contact.email',\n  );\n\n  contactPhone = optionalString(\n    body.contact,\n    'phone',\n    'contact.phone',\n  );\n}\n\n// Validate metadata.\nconst normalizedMetadata = {};\n\nif (has(body, 'metadata')) {\n  if (!isObject(body.metadata)) {\n    addError('metadata', 'invalid_type');\n  } else {\n    const allowedMetadataFields = new Set([\n      'pipeline_id',\n      'owner_id',\n    ]);\n\n    for (const key of Object.keys(body.metadata)) {\n      if (!allowedMetadataFields.has(key)) {\n        addError(`metadata.${key}`, 'unsupported_field');\n        continue;\n      }\n\n      const value = body.metadata[key];\n\n      if (value === null) {\n        normalizedMetadata[key] = null;\n        continue;\n      }\n\n      if (typeof value !== 'string') {\n        addError(`metadata.${key}`, 'invalid_type');\n        continue;\n      }\n\n      const normalizedValue = value.trim();\n\n      normalizedMetadata[key] =\n        normalizedValue === '' ? null : normalizedValue;\n    }\n  }\n}\n\nif (errors.length > 0) {\n  return [\n    {\n      json: {\n        validation_ok: false,\n        http_status: 400,\n        response_body: {\n          status: 'rejected',\n          error_code: 'invalid_payload',\n          errors,\n        },\n      },\n    },\n  ];\n}\n\n// Return only sanitized and normalized values.\n// Authorization headers are intentionally removed.\nreturn [\n  {\n    json: {\n      validation_ok: true,\n      source_system: 'mock_crm',\n      source_event_id: eventId,\n      source_deal_id: dealId,\n      intake_company_name: companyName,\n      intake_contact_first_name: contactFirstName,\n      intake_contact_last_name: contactLastName,\n      intake_contact_email: contactEmail,\n      intake_contact_phone: contactPhone,\n      intake_metadata: {\n        event_type: eventType,\n        crm: normalizedMetadata,\n      },\n      source_intake_event_key:\n        `crm:mock_crm:event:${eventId}:deal-won-received`,\n    },\n  },\n];"
+        },
+        "type": "n8n-nodes-base.code",
+        "typeVersion": 2,
+        "position": [
+          -368,
+          -48
+        ],
+        "id": "7492f862-3500-452a-aa38-34a24dd38b50",
+        "name": "Validate and Normalize Request"
+      },
+      {
+        "parameters": {
+          "conditions": {
+            "options": {
+              "caseSensitive": true,
+              "leftValue": "",
+              "typeValidation": "strict",
+              "version": 3
+            },
+            "conditions": [
+              {
+                "id": "7b7b4f78-86c0-4378-9f95-bc8f64c1fa30",
+                "leftValue": "={{ $json.validation_ok }}",
+                "rightValue": "",
+                "operator": {
+                  "type": "boolean",
+                  "operation": "true",
+                  "singleValue": true
+                }
+              }
+            ],
+            "combinator": "and"
+          },
+          "options": {}
+        },
+        "type": "n8n-nodes-base.if",
+        "typeVersion": 2.3,
+        "position": [
+          -160,
+          -48
+        ],
+        "id": "81b06e78-0c21-4e7f-b440-da4ebb557603",
+        "name": "Route Validation Result"
+      },
+      {
+        "parameters": {
+          "respondWith": "json",
+          "responseBody": "={{ $json.response_body }}",
+          "options": {
+            "responseCode": "={{ $json.http_status }}"
+          }
+        },
+        "type": "n8n-nodes-base.respondToWebhook",
+        "typeVersion": 1.5,
+        "position": [
+          48,
+          48
+        ],
+        "id": "d07b8967-7dd5-42d0-9c01-7103bade1ba6",
+        "name": "Reject Invalid Request"
+      },
+      {
+        "parameters": {
+          "operation": "executeQuery",
+          "query": "SELECT *\nFROM process_wf01_intake(\n    $1::text,\n    $2::text,\n    $3::text,\n    $4::text,\n    $5::text,\n    $6::text,\n    $7::text,\n    $8::text,\n    $9::jsonb\n);",
+          "options": {
+            "queryReplacement": "={{ [   $json.source_system,   $json.source_event_id,   $json.source_deal_id,   $json.intake_company_name,   $json.intake_contact_first_name,   $json.intake_contact_last_name,   $json.intake_contact_email,   $json.intake_contact_phone,   JSON.stringify($json.intake_metadata) ] }}"
+          }
+        },
+        "type": "n8n-nodes-base.postgres",
+        "typeVersion": 2.6,
+        "position": [
+          48,
+          -144
+        ],
+        "id": "022ad65d-51a0-4204-b7b0-14651f87fc13",
+        "name": "Process WF01 Intake",
+        "credentials": {
+          "postgres": {
+            "id": "zU4wPvkQFRBSwH0b",
+            "name": "B2B Onboarding App DB"
+          }
+        }
+      },
+      {
+        "parameters": {
+          "respondWith": "json",
+          "responseBody": "={\n  \"status\": \"rejected\",\n  \"error_code\": \"source_identity_conflict\"\n}",
+          "options": {
+            "responseCode": 409
+          }
+        },
+        "type": "n8n-nodes-base.respondToWebhook",
+        "typeVersion": 1.5,
+        "position": [
+          464,
+          -48
+        ],
+        "id": "d26f390c-e959-44a5-96ca-c57343f7cc92",
+        "name": "Reject Source Identity Conflict"
+      },
+      {
+        "parameters": {
+          "assignments": {
+            "assignments": [
+              {
+                "id": "44f754d4-824c-430f-b65d-0b840fb08dcc",
+                "name": "case_id",
+                "value": "={{ $json.case_id }}",
+                "type": "string"
+              },
+              {
+                "id": "1d698c24-be91-4403-9865-5edcba05ac98",
+                "name": "correlation_id",
+                "value": "={{ $json.correlation_id }}",
+                "type": "string"
+              },
+              {
+                "id": "64e0ec2b-225b-46ff-8ddd-008830f0de5c",
+                "name": "trigger_source",
+                "value": "wf01",
+                "type": "string"
+              },
+              {
+                "id": "38e08069-906e-4bff-994f-689f8a0ae09e",
+                "name": "request_cycle_key",
+                "value": "initial",
+                "type": "string"
+              }
+            ]
+          },
+          "options": {}
+        },
+        "type": "n8n-nodes-base.set",
+        "typeVersion": 3.4,
+        "position": [
+          672,
+          -336
+        ],
+        "id": "ba4c0b59-e431-450c-8566-c5c889d51502",
+        "name": "Build WF02 Invocation"
+      },
+      {
+        "parameters": {
+          "workflowId": {
+            "__rl": true,
+            "value": "l2oJE1KtPg4QuE89",
+            "mode": "list",
+            "cachedResultUrl": "/workflow/l2oJE1KtPg4QuE89",
+            "cachedResultName": "WF02 - Request Client Data - Implementation Complete"
+          },
+          "workflowInputs": {
+            "mappingMode": "defineBelow",
+            "value": {},
+            "matchingColumns": [],
+            "schema": [],
+            "attemptToConvertTypes": false,
+            "convertFieldsToString": true
+          },
+          "options": {
+            "waitForSubWorkflow": true
+          }
+        },
+        "type": "n8n-nodes-base.executeWorkflow",
+        "typeVersion": 1.3,
+        "position": [
+          880,
+          -336
+        ],
+        "id": "918f927d-760e-43e3-8453-7f7b915c589f",
+        "name": "Dispatch WF02",
+        "alwaysOutputData": false,
+        "onError": "continueErrorOutput"
+      },
+      {
+        "parameters": {
+          "respondWith": "json",
+          "responseBody": "={{ {\n  status: 'accepted',\n  intake_result: $('Process WF01 Intake').item.json.intake_result,\n  case_id: $('Process WF01 Intake').item.json.case_id,\n  correlation_id: $('Process WF01 Intake').item.json.correlation_id,\n  case_state: $('Process WF01 Intake').item.json.case_state,\n  wf02_dispatch: 'invoked'\n} }}",
+          "options": {
+            "responseCode": "={{ $('Process WF01 Intake').item.json.http_status }}"
+          }
+        },
+        "type": "n8n-nodes-base.respondToWebhook",
+        "typeVersion": 1.5,
+        "position": [
+          1120,
+          -416
+        ],
+        "id": "3b423d53-89f7-4b9e-b9e1-404b949a8724",
+        "name": "Accept Intake - WF02 Invoked"
+      },
+      {
+        "parameters": {
+          "respondWith": "json",
+          "responseBody": "={{ {\n  status: 'accepted',\n  intake_result: $json.intake_result,\n  case_id: $json.case_id,\n  correlation_id: $json.correlation_id,\n  case_state: $json.case_state,\n  wf02_dispatch: 'not_required'\n} }}",
+          "options": {
+            "responseCode": "={{ $json.http_status }}"
+          }
+        },
+        "type": "n8n-nodes-base.respondToWebhook",
+        "typeVersion": 1.5,
+        "position": [
+          672,
+          -144
+        ],
+        "id": "f871485d-079c-4fb8-a35e-925d9ee86c69",
+        "name": "Accept Intake - No Dispatch"
+      },
+      {
+        "parameters": {
+          "conditions": {
+            "options": {
+              "caseSensitive": true,
+              "leftValue": "",
+              "typeValidation": "strict",
+              "version": 3
+            },
+            "conditions": [
+              {
+                "id": "c9ea9721-3e32-4896-8c84-9500ae4d6b5d",
+                "leftValue": "={{ $json.database_outcome }}",
+                "rightValue": "accepted",
+                "operator": {
+                  "type": "string",
+                  "operation": "equals",
+                  "name": "filter.operator.equals"
+                }
+              }
+            ],
+            "combinator": "and"
+          },
+          "options": {}
+        },
+        "type": "n8n-nodes-base.if",
+        "typeVersion": 2.3,
+        "position": [
+          256,
+          -144
+        ],
+        "id": "de10c8c3-57a6-4f51-b3a0-d8ddbf612455",
+        "name": "Route Intake Result"
+      },
+      {
+        "parameters": {
+          "conditions": {
+            "options": {
+              "caseSensitive": true,
+              "leftValue": "",
+              "typeValidation": "strict",
+              "version": 3
+            },
+            "conditions": [
+              {
+                "id": "41a913b3-5f34-431d-a036-b88823dc958a",
+                "leftValue": "={{ $json.should_dispatch_wf02 }}",
+                "rightValue": "",
+                "operator": {
+                  "type": "boolean",
+                  "operation": "true",
+                  "singleValue": true
+                }
+              }
+            ],
+            "combinator": "and"
+          },
+          "options": {}
+        },
+        "type": "n8n-nodes-base.if",
+        "typeVersion": 2.3,
+        "position": [
+          464,
+          -240
+        ],
+        "id": "b87ba999-1854-46f6-bfb5-d4df04687abb",
+        "name": "Should Dispatch WF02"
+      },
+      {
+        "parameters": {
+          "mode": "raw",
+          "jsonOutput": "={{ {\n  source_variant: 'explicit_internal',\n  source_workflow_name: 'WF01 — Intake Deal Won',\n  source_workflow_id: String($workflow.id),\n  source_execution_id: String($execution.id),\n\n  case_id: $('Process WF01 Intake').item.json.case_id,\n  correlation_id: $('Process WF01 Intake').item.json.correlation_id,\n\n  error_class: 'dispatch_acceptance_failure',\n  error_code: 'wf02_dispatch_failed',\n  error_message:\n    $json.error?.message ??\n    $json.message ??\n    $json.description ??\n    'WF02 dispatch acceptance failed',\n\n  retryable: true,\n  severity: 'error',\n  requires_intervention: false,\n\n  error_details: {\n    failed_node: 'Dispatch WF02',\n    target_workflow: 'WF02 - Request Client Data - Implementation Complete',\n    original_error:\n      $json.error?.message ??\n      $json.message ??\n      $json.description ??\n      null\n  }\n} }}",
+          "options": {}
+        },
+        "type": "n8n-nodes-base.set",
+        "typeVersion": 3.4,
+        "position": [
+          1120,
+          -208
+        ],
+        "id": "57a27464-94e7-4b35-ad3f-46e56686392c",
+        "name": "Build WF99 Dispatch Failure"
+      },
+      {
+        "parameters": {
+          "workflowId": {
+            "__rl": true,
+            "value": "WykBM7mvCOqph91a",
+            "mode": "list",
+            "cachedResultUrl": "/workflow/WykBM7mvCOqph91a",
+            "cachedResultName": "WF99 - Central Error Handler"
+          },
+          "workflowInputs": {
+            "mappingMode": "defineBelow",
+            "value": {},
+            "matchingColumns": [],
+            "schema": [],
+            "attemptToConvertTypes": false,
+            "convertFieldsToString": true
+          },
+          "options": {
+            "waitForSubWorkflow": true
+          }
+        },
+        "type": "n8n-nodes-base.executeWorkflow",
+        "typeVersion": 1.3,
+        "position": [
+          1328,
+          -208
+        ],
+        "id": "45a67e4d-b0c3-493a-9008-2a4cd1e198c9",
+        "name": "Dispatch WF99",
+        "alwaysOutputData": true
+      },
+      {
+        "parameters": {
+          "respondWith": "json",
+          "responseBody": "={\n  \"status\": \"error\",\n  \"error_code\": \"wf02_dispatch_failed\"\n}",
+          "options": {
+            "responseCode": 500
+          }
+        },
+        "type": "n8n-nodes-base.respondToWebhook",
+        "typeVersion": 1.5,
+        "position": [
+          1536,
+          -208
+        ],
+        "id": "1c9e73ca-d8d3-4c89-af44-a263f39e2bbe",
+        "name": "Reject WF02 Dispatch Failure"
+      }
+    ],
+    "connections": {
+      "Deal Won Webhook": {
+        "main": [
+          [
+            {
+              "node": "Validate and Normalize Request",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Validate and Normalize Request": {
+        "main": [
+          [
+            {
+              "node": "Route Validation Result",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Route Validation Result": {
+        "main": [
+          [
+            {
+              "node": "Process WF01 Intake",
+              "type": "main",
+              "index": 0
+            }
+          ],
+          [
+            {
+              "node": "Reject Invalid Request",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Process WF01 Intake": {
+        "main": [
+          [
+            {
+              "node": "Route Intake Result",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Build WF02 Invocation": {
+        "main": [
+          [
+            {
+              "node": "Dispatch WF02",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Dispatch WF02": {
+        "main": [
+          [
+            {
+              "node": "Accept Intake - WF02 Invoked",
+              "type": "main",
+              "index": 0
+            }
+          ],
+          [
+            {
+              "node": "Build WF99 Dispatch Failure",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Route Intake Result": {
+        "main": [
+          [
+            {
+              "node": "Should Dispatch WF02",
+              "type": "main",
+              "index": 0
+            }
+          ],
+          [
+            {
+              "node": "Reject Source Identity Conflict",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Should Dispatch WF02": {
+        "main": [
+          [
+            {
+              "node": "Build WF02 Invocation",
+              "type": "main",
+              "index": 0
+            }
+          ],
+          [
+            {
+              "node": "Accept Intake - No Dispatch",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Build WF99 Dispatch Failure": {
+        "main": [
+          [
+            {
+              "node": "Dispatch WF99",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Dispatch WF99": {
+        "main": [
+          [
+            {
+              "node": "Reject WF02 Dispatch Failure",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      }
+    },
+    "settings": {
+      "executionOrder": "v1",
+      "binaryMode": "separate",
+      "availableInMCP": false
+    },
+    "staticData": null,
+    "meta": {
+      "templateCredsSetupCompleted": true
+    },
+    "nodeGroups": [],
+    "pinData": {},
+    "versionId": "2f250d01-59cd-4e9a-9658-c8038ecc3c05",
+    "activeVersionId": null,
+    "versionCounter": 109,
+    "triggerCount": 1,
+    "sourceWorkflowId": null,
+    "tags": [],
+    "shared": [
+      {
+        "updatedAt": "2026-07-31T21:04:38.032Z",
+        "createdAt": "2026-07-31T21:04:38.032Z",
+        "role": "workflow:owner",
+        "workflowId": "g4XEAiAzhu1fz5wn",
+        "projectId": "zmxxmv9P8lYEvh92",
+        "project": {
+          "updatedAt": "2026-07-29T20:13:12.237Z",
+          "createdAt": "2026-07-18T09:24:05.682Z",
+          "id": "zmxxmv9P8lYEvh92",
+          "name": "Vitalii pokhylvitalii@gmail.com <pokhylvitalii.it@gmail.com>",
+          "type": "personal",
+          "icon": null,
+          "description": null,
+          "customTelemetryTags": [],
+          "creatorId": "9bff2e70-7eea-4940-a9da-d5dfd1c2d055"
+        }
+      }
+    ],
+    "versionMetadata": {
+      "name": null,
+      "description": null
+    }
+  }
+]
